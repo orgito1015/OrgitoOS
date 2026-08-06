@@ -1,3 +1,4 @@
+![OrgitoOS](OrgitoOS.png)
 # OrgitoOS - Advanced Research Kernel
 
 OrgitoOS is a research-oriented, open-source operating system built from scratch for the x86 architecture. It features a **modular monolithic architecture**, complete exception handling, memory management, and timer support - a production-ready foundation for OS research and experimentation.
