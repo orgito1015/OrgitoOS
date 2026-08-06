@@ -1,0 +1,30 @@
+/*
+ * OrgitoOS - Kernel Heap Allocator
+ * 
+ * Provides dynamic memory allocation for the kernel (kmalloc/kfree).
+ */
+
+#ifndef ORGITOOS_MEMORY_HEAP_H
+#define ORGITOOS_MEMORY_HEAP_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+/* Initialize the kernel heap */
+void heap_init(void *start, size_t size);
+
+/* Allocate memory from kernel heap */
+void *kmalloc(size_t size);
+
+/* Allocate aligned memory from kernel heap */
+void *kmalloc_aligned(size_t size, size_t alignment);
+
+/* Free memory allocated from kernel heap */
+void kfree(void *ptr);
+
+
+/* Report heap usage (payload bytes). Any out-pointer may be NULL. */
+void heap_get_stats(size_t *total_payload, size_t *used_payload,
+                    size_t *free_payload, uint32_t *block_count);
+
+#endif /* ORGITOOS_MEMORY_HEAP_H */
