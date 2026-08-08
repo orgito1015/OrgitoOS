@@ -6,6 +6,12 @@
 #include "exceptions.h"
 #include "idt.h"
 #include <stddef.h>
+/* Same layering precedent as drivers/timer.c, which already calls into
+ * process/scheduler.h from an interrupt handler: a ring-3 page fault must
+ * be able to kill just the faulting process instead of halting the whole
+ * kernel (see memory/vmm.c for the kernel/user memory-protection split
+ * that makes this reachable in normal operation, not just kernel bugs). */
+#include "../../process/process.h"
 
 /* Forward declarations */
 void console_write(const char* s);
@@ -128,7 +134,23 @@ void exception_handler(struct exception_registers *regs) {
         else console_write("(Kernel mode)");
         console_write("\n\n");
     }
-    
+
+    /* Any exception whose CS RPL is 3 happened while ring-3 code was
+     * executing. With the kernel/user memory-protection split in
+     * memory/vmm.c, a page fault here is an expected consequence of a
+     * process touching memory it doesn't own — and a divide-by-zero,
+     * invalid opcode, or GPF from ring 3 is just a bad process, not a
+     * kernel bug either way. Kill only that process and keep the rest of
+     * the system running, instead of falling through to the
+     * panic-and-halt path below. Exceptions with CS RPL 0 (kernel mode)
+     * still fall through and halt — those are real kernel bugs. */
+    if ((regs->cs & 0x3) == 3) {
+        console_write("Terminating faulting user process (pid ");
+        print_dec(process_getpid());
+        console_write(")\n\n");
+        process_exit(-1);   /* noreturn: switches away via schedule() */
+    }
+
     /* Print register dump */
     console_write("Register Dump:\n");
     console_write("  EAX="); print_hex(regs->eax);

@@ -42,6 +42,7 @@ void cmd_spawn(int argc, char** argv);
 void cmd_forktest(int argc, char** argv);
 void cmd_user(int argc, char** argv);
 void cmd_counters(int argc, char** argv);
+void cmd_uecho(int argc, char** argv);
 void cmd_psleep(int argc, char** argv);
 void cmd_sched(int argc, char** argv);
 

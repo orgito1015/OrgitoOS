@@ -93,6 +93,7 @@ void commands_register_all(void) {
     shell_register_command("forktest", "Run ring 3 fork()/wait() demo", cmd_forktest);
     shell_register_command("user", "Run ring 3 hello program (syscalls)", cmd_user);
     shell_register_command("counters", "Run N ring 3 counters [counters <n>]", cmd_counters);
+    shell_register_command("uecho", "Run ring 3 read() demo (type a line back)", cmd_uecho);
     shell_register_command("psleep", "Sleep the shell [psleep <ms>]", cmd_psleep);
     shell_register_command("sched", "Show scheduler statistics", cmd_sched);
 }

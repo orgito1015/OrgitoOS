@@ -7,6 +7,7 @@
  *   forktest  - launch a ring 3 program that fork()s and wait()s
  *   user      - launch a ring 3 hello-world program
  *   counters  - launch N ring 3 counter programs concurrently
+ *   uecho     - launch a ring 3 program that read()s a line and echoes it
  *   psleep    - put the shell to sleep for N ms (scheduler demo)
  *   sched     - scheduler statistics
  */
@@ -212,6 +213,18 @@ void cmd_counters(int argc, char **argv) {
             console_write("\n");
         }
     }
+}
+
+void cmd_uecho(int argc, char **argv) {
+    (void)argc; (void)argv;
+    process_t *p = process_create_user("uecho", uprog_echo, PRIORITY_NORMAL);
+    if (!p) {
+        console_write("uecho: failed to create user process\n");
+        return;
+    }
+    console_write("Launched ring 3 read() demo as pid ");
+    write_dec(p->pid);
+    console_write(" - type a line and press Enter\n");
 }
 
 void cmd_psleep(int argc, char **argv) {

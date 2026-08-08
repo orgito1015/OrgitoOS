@@ -7,6 +7,15 @@
 #include <stddef.h>
 #include <stdbool.h>
 
+/*
+ * Kernel image boundaries from the linker script (linker.ld). Addresses,
+ * not variables — only their &-address is meaningful. [kernel_start,
+ * rodata_start) is the kernel's .text: the only slice of the identity map
+ * that stays user-executable (see vmm_init()).
+ */
+extern uint8_t kernel_start[];
+extern uint8_t rodata_start[];
+
 /* Current page directory */
 static struct page_directory *current_directory = 0;
 
@@ -152,17 +161,27 @@ void vmm_init(void) {
         ram_end = 0x4000000;         /* cap: 64 MiB   */
     }
     /*
-     * Phase 1 note: the identity map is marked PTE_USER so ring 3
-     * processes (whose code and stacks currently live inside the
-     * kernel's flat address space) can execute. This means there is NO
-     * kernel/user memory protection yet — user code is only prevented
-     * from executing privileged instructions and from bypassing
-     * syscalls by convention. Per-process page directories with proper
-     * supervisor-only kernel mappings are Phase 2 work.
+     * Kernel/user memory protection: the identity map is supervisor-only
+     * by default (no PTE_USER), which covers the kernel heap, the PMM
+     * bitmap, the process table (PCBs), and every process's kernel stack
+     * (kmalloc'd from this same region) — none of it is reachable from
+     * ring 3 anymore.
+     *
+     * The one carve-out is [kernel_start, rodata_start): the kernel's own
+     * .text. OrgitoOS has no exec() yet (see docs/roadmap/roadmap.md), so
+     * ring 3 "processes" are kernel-linked C functions
+     * (kernel/user_programs.c) entered via enter_user_mode() — they must
+     * be able to fetch their own code. They already talk to the kernel
+     * exclusively through int 0x80 syscalls, never by touching
+     * .rodata/.data/.bss directly, so nothing past rodata_start needs to
+     * stay user-accessible.
      */
     vmm_identity_map_region(kernel_directory, 0, ram_end,
+                           PTE_PRESENT | PTE_WRITABLE);
+    vmm_identity_map_region(kernel_directory, kernel_start,
+                           (uint32_t)rodata_start - (uint32_t)kernel_start,
                            PTE_PRESENT | PTE_WRITABLE | PTE_USER);
-    
+
     /* Set as current directory */
     current_directory = kernel_directory;
     

@@ -24,12 +24,14 @@
 
 #include "syscall.h"
 #include "kernel.h"
+#include "string.h"
 #include "../process/process.h"
 #include "../process/scheduler.h"
 #include "../memory/heap.h"
 #include "../memory/pmm.h"
 #include "../memory/vmm.h"
 #include "../drivers/console.h"
+#include "../drivers/keyboard.h"
 #include "../arch/x86/idt.h"
 #include "../arch/x86/gdt.h"
 
@@ -51,7 +53,7 @@ void syscall_init(void) {
      */
     idt_set_gate(0x80, (uint32_t)int80_handler,
                  KERNEL_CODE_SEGMENT, IDT_FLAGS_USER);
-    console_write("Syscalls: int 0x80 gate installed (8 syscalls)\n");
+    console_write("Syscalls: int 0x80 gate installed (9 syscalls)\n");
 }
 
 /* ------------------------------------------------------------------ */
@@ -67,6 +69,27 @@ static int sys_write(const char *str) {
         n++;
     }
     return n;
+}
+
+/* ------------------------------------------------------------------ */
+/* sys_read                                                             */
+/* ------------------------------------------------------------------ */
+
+/*
+ * There is exactly one keyboard input line buffer in the whole system
+ * (drivers/keyboard.c), shared by the interactive shell's own prompt loop
+ * and every ring-3 process that calls read(). Both consumers block on the
+ * same keyboard_get_line(), so if a spawned process reads concurrently
+ * with the shell sitting at its own prompt, the pending line can be
+ * delivered to whichever side happens to check first - there is no
+ * per-process input queue or tty layer yet. Fine for a single
+ * foreground reader (the common case for the `uecho` demo below); a real
+ * fix needs device files / a line discipline, out of scope here.
+ */
+static int sys_read(char *buf, uint32_t maxlen) {
+    if (!buf || maxlen == 0) return maxlen == 0 ? 0 : -1;
+    keyboard_get_line(buf, maxlen);
+    return (int)string_length(buf);
 }
 
 /* ------------------------------------------------------------------ */
@@ -247,6 +270,10 @@ void syscall_dispatch(regs_t *r) {
             r->eax = (uint32_t)pid;
             break;
         }
+
+        case SYS_READ:
+            r->eax = (uint32_t)sys_read((char *)r->ebx, r->ecx);
+            break;
 
         default:
             r->eax = (uint32_t)-1;

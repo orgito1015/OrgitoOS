@@ -32,10 +32,18 @@ SECTIONS
   }
 
   /* Read-only data section - contains string literals and const data
-   * Aligned to 4 KiB for memory protection (future)
+   * Aligned to 4 KiB for memory protection.
+   *
+   * rodata_start marks the page-aligned boundary where the kernel's
+   * user-executable .text ends. memory/vmm.c uses [kernel_start,
+   * rodata_start) as the only identity-mapped range that keeps PTE_USER,
+   * so ring 3 can fetch its own (kernel-linked) code but nothing from
+   * here onward - kernel heap, PCBs, kernel stacks, and now .rodata/.data/
+   * .bss - is reachable from ring 3.
    */
   .rodata ALIGN(4K) :
   {
+    rodata_start = .;
     *(.rodata*)
   }
 

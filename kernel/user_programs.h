@@ -18,4 +18,7 @@ void uprog_forktest(void);
 /* Counter that yields between iterations (scheduler demo). */
 void uprog_counter(void);
 
+/* Reads a line via sys_read and echoes it back (read() demo). */
+void uprog_echo(void);
+
 #endif /* ORGITOOS_KERNEL_USER_PROGRAMS_H */

@@ -76,15 +76,21 @@ See [docs/architecture/ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md) for d
 - ✅ **Ring 3 user mode** - GDT/TSS-based privilege transitions (`arch/x86/gdt.c`, `context.S`)
 - ✅ **System calls** - `int 0x80` gate with `exit`/`write`/`getpid`/`fork`/`yield`/`sleep`/`getppid`/`wait` (`kernel/syscall.c`)
 - ✅ **Kernel heap allocator** - `kmalloc`/`kfree` first-fit free list (`memory/heap.c`)
-- ✅ **Shell process commands** - `ps`, `kill`, `spawn`, `forktest`, `user`, `sched`, `psleep`, `counters` (`kernel/proc_commands.c`)
+- ✅ **Shell process commands** - `ps`, `kill`, `spawn`, `forktest`, `user`, `sched`, `psleep`, `counters`, `uecho` (`kernel/proc_commands.c`)
+- ✅ **`read()` syscall** - ring 3 processes can now read a line of keyboard input via `int 0x80` (`kernel/syscall.c`, `include/usyscall.h`), demoed by the `uecho` shell command
 
-### Phase 2 - Address Space Isolation & Further Hardening (In Progress / Planned)
-- 🔲 Per-process page directories with private, non-shared physical stacks
-- 🔲 Kernel/user memory protection (splitting the identity map so ring 3 can no
-  longer read/write kernel code, heap, or other processes' kernel stacks)
+### Phase 2 - Address Space Isolation & Further Hardening (In Progress)
+- ✅ **Per-process page directories** with private, non-shared physical user stacks
+- ✅ **Kernel/user memory protection** - the identity map is supervisor-only by
+  default; only the kernel's `.text` stays `PTE_USER` (ring 3 "processes" are
+  kernel-linked functions with no `exec()` yet), so kernel heap, the process
+  table (PCBs), and other processes' kernel stacks are no longer reachable from
+  ring 3. Ring-3 faults now kill just the offending process instead of halting
+  the whole system (`memory/vmm.c`, `arch/x86/exceptions.c`)
 - 🔲 Real networking (packet TX/RX, socket send/receive — currently stubs)
 - 🔲 SMP Application Processor bring-up (CPU detection works; APIC-driven boot does not)
 - 🔲 Shell pipe redirection between commands
+- 🔲 `exec()` - user code is still kernel-linked function pointers, not loaded binaries
 - And more! See [roadmap.md](docs/roadmap/roadmap.md)
 
 ##  Quick Start
@@ -253,6 +259,15 @@ OrgitoOS includes a built-in shell with the following commands:
 | `rm <name>...` | Remove file(s) or directory entries |
 | `meminfo` | Show physical (PMM) and kernel heap memory usage |
 | `reboot` | Reboot the system |
+| `ps` | List processes (pid, ppid, state, priority, cpu, name) |
+| `kill <pid>` | Terminate a process by pid |
+| `spawn [n]` | Launch demo kernel threads (workers) |
+| `sched` | Show scheduler statistics |
+| `psleep [ms]` | Sleep the shell for N ms (other processes keep running) |
+| `user` | Launch a ring 3 "hello world" program (syscalls demo) |
+| `forktest` | Launch a ring 3 program that `fork()`s and `wait()`s |
+| `counters [n]` | Launch N ring 3 counter programs running concurrently |
+| `uecho` | Launch a ring 3 program that `read()`s a line and echoes it back |
 
 ### `ls` — List Directory Contents
 
@@ -446,8 +461,12 @@ The project website is hosted on **GitHub Pages** and lives in the `docs/` direc
 ### Live URL
 
 ```
-https://orgito1015.github.io/My-Operating-System-OpenOS/
+https://orgito1015.github.io/OrgitoOS/
 ```
+
+*(This repository's remote is `github.com/orgito1015/OrgitoOS` — the Pages URL
+must match the current repo name. An older name, `My-Operating-System-OpenOS`,
+used to be linked here and pointed at a repo that no longer exists.)*
 
 ### Enable GitHub Pages (repository owner)
 

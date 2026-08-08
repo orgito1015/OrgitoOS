@@ -45,14 +45,19 @@ This roadmap previously undercounted progress — several phases below were mark
   per switch (`arch/x86/context.S`, `process/scheduler.c`)
 - [x] Multilevel round-robin scheduler with anti-starvation aging, idle process
   (`process/scheduler.c`)
-- [ ] Switch page directories per process — every process currently shares the
-  kernel's single page directory (see "Phase 2 (address space isolation)" below)
+- [x] Switch page directories per process — every user process gets its own
+  page directory (`vmm_create_directory`/`vmm_switch_directory`), switched on
+  every context switch (`process/scheduler.c`)
 
 ## Phase 5: System Calls — ✅ Complete
 - [x] Ring 3 segments in GDT, TSS-based kernel-stack switching, privilege level changes
 - [x] `int 0x80` syscall gate and dispatcher (`arch/x86/syscall.S`, `kernel/syscall.c`)
 - [x] `exit()`, `write()`, `getpid()`, `fork()`, `yield()`, `sleep()`, `getppid()`, `wait()`
-- [ ] `read()` from a syscall (keyboard input is currently shell-only, not exposed to user processes)
+- [x] `read()` from a syscall — reuses the existing blocking `keyboard_get_line()`
+  (`kernel/syscall.c` `sys_read`, `include/usyscall.h` `u_read`); demoed by the
+  `uecho` shell command. There is still only one shared input line buffer, so a
+  process reading concurrently with the shell's own prompt can race it — no
+  per-process input queue/tty layer yet
 - [ ] `exec()` — not implemented; user "processes" are kernel-linked function pointers
 
 ## Phase 6: Enhanced Shell — ✅ Complete
@@ -75,17 +80,29 @@ This roadmap previously undercounted progress — several phases below were mark
 - [ ] Real VESA/VBE graphics output (current GUI is an in-memory buffer, not displayed)
 - [ ] Shell pipe redirection between commands (`kernel/script.c` has a stub)
 
-## Next: Address Space Isolation (Phase 2 successor)
+## Phase 2 successor: Address Space Isolation — ✅ Complete
 
-**Goal**: Close the memory-protection gap `memory/vmm.c` itself documents — every
-process currently shares one identity-mapped, fully `PTE_USER` address space, so
-there's no isolation between processes or between user and kernel memory.
+**Goal**: Close the memory-protection gap `memory/vmm.c` used to document — every
+process shared one identity-mapped, fully `PTE_USER` address space, so there was no
+isolation between processes or between user and kernel memory.
 
-- [ ] Per-process page directories with a private, non-shared physical backing for
-  each process's user stack (activates `vmm_create_directory`/`vmm_switch_directory`,
-  currently unused)
-- [ ] Kernel/user memory protection: split the identity map at the code/data boundary
-  so ring 3 can no longer read/write kernel heap, other processes' kernel stacks, or PCBs
+- [x] Per-process page directories with a private, non-shared physical backing for
+  each process's user stack (`vmm_create_directory`/`vmm_switch_directory`,
+  `process_create_user`, `sys_fork`)
+- [x] Kernel/user memory protection: the identity map is supervisor-only by default;
+  only `[kernel_start, rodata_start)` (the kernel's `.text`, needed since ring 3
+  "processes" are kernel-linked functions with no `exec()` yet) stays `PTE_USER`.
+  Kernel heap, the PMM bitmap, the process table (PCBs), and every process's kernel
+  stack are no longer reachable from ring 3 (`memory/vmm.c`, `linker.ld`)
+- [x] Any exception (page fault, divide-by-zero, invalid opcode, GPF, ...) that
+  happens while running in ring 3 kills only the faulting process instead of
+  halting the whole system, so the protection above is actually usable rather
+  than freezing the OS on the first violation (`arch/x86/exceptions.c`);
+  exceptions with CS RPL 0 (real kernel bugs) still panic and halt as before
+
+**Residual scope** (not done here — separate, larger work):
+- `.text` stays user-writable, not just user-executable — full W^X needs `exec()`
+  so ring-3 code isn't kernel-linked into the same image
 
 ## Contributing to the Roadmap
 

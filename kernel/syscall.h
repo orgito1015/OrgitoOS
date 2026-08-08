@@ -23,7 +23,8 @@
 #define SYS_SLEEP    5   /* sleep(ms)                    */
 #define SYS_GETPPID  6   /* getppid()                    */
 #define SYS_WAIT     7   /* wait(&status) -> child pid   */
-#define SYS_MAX      8
+#define SYS_READ     8   /* read(buf, maxlen) -> chars read */
+#define SYS_MAX      9
 
 /*
  * Register frame pushed by int80_handler, lowest address first:

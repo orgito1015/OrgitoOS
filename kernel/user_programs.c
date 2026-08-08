@@ -114,3 +114,21 @@ void uprog_counter(void) {
     u_write("] done\n");
     u_exit(0);
 }
+
+/* ------------------------------------------------------------------ */
+
+void uprog_echo(void) {
+    char buf[128];
+
+    u_write("[echo] type a line: ");
+    int n = u_read(buf, sizeof(buf));
+    if (n < 0) {
+        u_write("\n[echo] read() failed\n");
+        u_exit(1);
+    }
+
+    u_write("\n[echo] you said: ");
+    u_write(buf);
+    u_write("\n");
+    u_exit(0);
+}
