@@ -24,7 +24,8 @@
 #define SYS_GETPPID  6   /* getppid()                    */
 #define SYS_WAIT     7   /* wait(&status) -> child pid   */
 #define SYS_READ     8   /* read(buf, maxlen) -> chars read */
-#define SYS_MAX      9
+#define SYS_EXEC     9   /* exec(path) -> new pid | -1  */
+#define SYS_MAX      10
 
 /*
  * Register frame pushed by int80_handler, lowest address first:

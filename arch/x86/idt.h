@@ -28,4 +28,11 @@ void idt_init(void);
 /* Set an IDT gate */
 void idt_set_gate(uint8_t num, uint32_t handler, uint16_t selector, uint8_t flags);
 
+/* Load the already-built kernel IDT into *this* CPU's IDTR. Every CPU
+ * needs its own `lidt`, even though they all point at the same shared
+ * table in memory - kernel/apic.c's AP entry path calls this to give
+ * each Application Processor a working IDT without building a second,
+ * independent one. */
+void idt_reload(void);
+
 #endif /* ORGITOOS_ARCH_X86_IDT_H */

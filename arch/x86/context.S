@@ -15,6 +15,8 @@
 .set USER_CODE_SELECTOR,  0x1B     /* 0x18 | RPL 3 */
 .set USER_DATA_SELECTOR,  0x23     /* 0x20 | RPL 3 */
 
+.extern finish_switch
+
 .section .text
 
 /*
@@ -121,10 +123,25 @@ enter_user_mode:
  * stack was constructed by sys_fork() so that ESP points at a copied
  * syscall register frame (with EAX = 0). Unwind it exactly like the
  * int 0x80 stub epilogue and IRET back to user mode.
+ *
+ * Reached the same way process.c's kthread_launch() is: via
+ * context_switch()'s `ret`, immediately after schedule() (kernel/
+ * syscall.c's sys_fork()) set this up as the child's saved return
+ * target. A brand-new process/child never "returns into" schedule()'s
+ * own post-context_switch() code, so it must finish the scheduler
+ * handoff itself - see process/scheduler.c's file header for the full
+ * protocol. Calling it here, before any of the pops below, is
+ * deliberate: this is the one point in this function where ds/es/fs/gs
+ * are still guaranteed to hold whatever value the *kernel* scheduler
+ * context left them as (untouched by context_switch(), which never
+ * touches segment registers) - i.e. still valid for an ordinary C
+ * function call - rather than the user-mode values about to be popped
+ * from the copied syscall frame below.
  */
 .global fork_child_return
 .type fork_child_return, @function
 fork_child_return:
+    call finish_switch
     pop %gs
     pop %fs
     pop %es

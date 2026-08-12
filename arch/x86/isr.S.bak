@@ -1,0 +1,142 @@
+/*
+ * OrgitoOS - Interrupt Service Routines (Assembly)
+ */
+
+/* Kernel segment selectors (from GRUB's GDT) */
+.set KERNEL_DATA_SEGMENT, 0x10
+
+.section .text
+
+/* External C handlers */
+.extern keyboard_handler
+.extern timer_handler
+
+/* IRQ0 (Timer) handler */
+.global irq0_handler
+.type irq0_handler, @function
+irq0_handler:
+    /* Save all general purpose registers */
+    pusha
+    
+    /* Save segment registers */
+    push %ds
+    push %es
+    push %fs
+    push %gs
+    
+    /* Load kernel data segment */
+    mov $KERNEL_DATA_SEGMENT, %ax
+    mov %ax, %ds
+    mov %ax, %es
+    mov %ax, %fs
+    mov %ax, %gs
+    
+    /* Call C timer handler */
+    call timer_handler
+    
+    /* Restore segment registers */
+    pop %gs
+    pop %fs
+    pop %es
+    pop %ds
+    
+    /* Restore general purpose registers */
+    popa
+    
+    /* Return from interrupt */
+    iret
+
+/* IRQ1 (Keyboard) handler */
+.global irq1_handler
+.type irq1_handler, @function
+irq1_handler:
+    /* Save all general purpose registers */
+    pusha
+    
+    /* Save segment registers */
+    push %ds
+    push %es
+    push %fs
+    push %gs
+    
+    /* Load kernel data segment */
+    mov $KERNEL_DATA_SEGMENT, %ax
+    mov %ax, %ds
+    mov %ax, %es
+    mov %ax, %fs
+    mov %ax, %gs
+    
+    /* Call C keyboard handler */
+    call keyboard_handler
+    
+    /* Restore segment registers */
+    pop %gs
+    pop %fs
+    pop %es
+    pop %ds
+    
+    /* Restore general purpose registers */
+    popa
+    
+    /* Return from interrupt */
+    iret
+
+/*
+ * Generic IRQ2-15 stubs, for device drivers whose IRQ line isn't known
+ * until runtime (e.g. read from PCI config space) - unlike IRQ0/timer
+ * and IRQ1/keyboard above, which get a fixed, dedicated handler each.
+ * All fourteen share one C-level dispatcher (arch/x86/irq.c
+ * irq_generic_dispatch), parameterized by IRQ number.
+ */
+.extern irq_generic_dispatch
+
+.macro IRQ_STUB num
+.global irq\num\()_handler
+.type irq\num\()_handler, @function
+irq\num\()_handler:
+    pusha
+    push %ds
+    push %es
+    push %fs
+    push %gs
+
+    mov $KERNEL_DATA_SEGMENT, %ax
+    mov %ax, %ds
+    mov %ax, %es
+    mov %ax, %fs
+    mov %ax, %gs
+
+    push $\num
+    call irq_generic_dispatch
+    add $4, %esp
+
+    pop %gs
+    pop %fs
+    pop %es
+    pop %ds
+    popa
+    iret
+.endm
+
+IRQ_STUB 2
+IRQ_STUB 3
+IRQ_STUB 4
+IRQ_STUB 5
+IRQ_STUB 6
+IRQ_STUB 7
+IRQ_STUB 8
+IRQ_STUB 9
+IRQ_STUB 10
+IRQ_STUB 11
+IRQ_STUB 12
+IRQ_STUB 13
+IRQ_STUB 14
+IRQ_STUB 15
+
+/* IDT load function */
+.global idt_load
+.type idt_load, @function
+idt_load:
+    mov 4(%esp), %eax
+    lidt (%eax)
+    ret

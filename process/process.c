@@ -1,29 +1,44 @@
 /*
- * OrgitoOS - Process Management (Phase 1)
+ * OrgitoOS - Process Management (Phase 1 + per-CPU scheduling)
  *
  * Implements the process table, kernel threads, ring 3 processes,
  * exit/kill/wait/sleep. Scheduling policy lives in scheduler.c; the
  * low-level register save/restore lives in arch/x86/context.S.
  *
+ * Locking: every mutation of the shared process table (alloc_pcb() and
+ * every state transition below) happens under g_sched_lock (see
+ * process/percpu.h) with interrupts disabled on the calling CPU - the
+ * same critical sections this file always cli/sti'd around in the
+ * single-CPU design, just now also excluding other CPUs. Paths that call
+ * schedule() (directly or via scheduler_block_current()) do NOT
+ * explicitly release g_sched_lock afterward - see scheduler.c's
+ * schedule()/finish_switch() for why release is deferred to whichever
+ * process resumes next, not to this call site.
+ *
  * Kernel stack layout for a brand-new kernel thread (top downward):
  *
- *      kstack_top -> [ arg                ]  argument for entry()
- *                    [ process_thread_exit ]  entry()'s return address
- *                    [ entry              ]  context_switch ret target
- *                    [ EFLAGS = 0x202     ]  IF=1 once first scheduled
+ *      kstack_top -> [ EFLAGS = 0x202     ]  IF=1 once first scheduled
  *                    [ EBP = 0            ]
  *                    [ EBX = 0            ]
  *                    [ ESI = 0            ]
  *      esp --------> [ EDI = 0            ]
  *
  * context_switch() pops the callee-saved registers and EFLAGS, then
- * `ret` transfers control to entry() which sees a perfectly ordinary
- * cdecl frame: a return address (process_thread_exit) and one argument.
- * If entry() ever returns, it falls into process_thread_exit(), which
- * terminates the process cleanly.
+ * `ret` transfers control to kthread_launch() - an ordinary C function
+ * (not a hand-crafted fake return frame the way `entry` used to be
+ * jumped to directly): it finishes the scheduler handoff
+ * (finish_switch()) and then makes a normal call to whatever entry/arg
+ * process_create() stashed in the PCB (p->pending_entry/pending_arg).
+ * This indirection - through a PCB field and a real function call,
+ * rather than baking `entry`'s address and argument directly into the
+ * initial stack frame - exists so kthread_launch() has a place to run
+ * finish_switch() before any process-supplied code executes; see
+ * scheduler.c's file header for why that has to happen on the resuming
+ * side, not in schedule() itself.
  */
 
 #include "process.h"
+#include "percpu.h"
 #include "scheduler.h"
 #include "../memory/heap.h"
 #include "../memory/pmm.h"
@@ -36,12 +51,9 @@
 /* From arch/x86/context.S */
 extern void enter_user_mode(uint32_t entry, uint32_t user_stack_top);
 
-/* Process table */
+/* Process table - shared across every CPU, protected by g_sched_lock. */
 static process_t process_table[PROCESS_MAX];
 static uint32_t  next_pid = 1;
-
-/* Currently running process (set up by process_init/scheduler) */
-process_t *current_process = 0;
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                              */
@@ -61,12 +73,12 @@ static void copy_name(process_t *p, const char *name) {
     p->name[i] = '\0';
 }
 
-/* Find a free table slot. Interrupts must be disabled. */
+/* Find a free table slot. Caller must hold g_sched_lock with interrupts
+ * disabled. */
 static process_t *alloc_pcb(void) {
     for (int i = 0; i < PROCESS_MAX; i++) {
         if (process_table[i].state == PROCESS_STATE_UNUSED) {
             process_t *p = &process_table[i];
-            /* Clear the whole PCB */
             uint8_t *b = (uint8_t *)p;
             for (size_t j = 0; j < sizeof(*p); j++) b[j] = 0;
             p->pid = next_pid++;
@@ -87,8 +99,9 @@ void process_init(void) {
 
     /*
      * Adopt the current boot context (kmain, running on the boot stack)
-     * as PID 0: the idle process. It never sits in a ready queue; the
-     * scheduler falls back to it when nothing else is runnable.
+     * as PID 0: CPU 0's (the BSP's) idle process. It never sits in a
+     * ready queue; the scheduler falls back to it when nothing else -
+     * including stolen work from another CPU - is runnable on this CPU.
      */
     process_t *idle = &process_table[0];
     uint8_t *b = (uint8_t *)idle;
@@ -101,11 +114,45 @@ void process_init(void) {
     idle->base_priority = PRIORITY_LOW;
     idle->quantum_left  = SCHED_QUANTUM_TICKS;
     idle->page_dir      = vmm_kernel_directory();
+    idle->is_idle       = 1;
     copy_name(idle, "idle");
 
-    current_process = idle;
+    g_cpu_locals[0].proc = idle;
+    g_cpu_locals[0].idle = idle;
 
-    console_write("Process: table initialized (64 slots), PID 0 = idle\n");
+    console_write("Process: table initialized (64 slots), PID 0 = idle (CPU 0)\n");
+}
+
+void process_init_ap(uint32_t cpu_id) {
+    irq_disable();
+    spin_lock(&g_sched_lock);
+
+    process_t *idle = alloc_pcb();
+    if (!idle) {
+        /* Out of PCB slots - should not happen at boot with only a
+         * handful of CPUs and PROCESS_MAX=64, but fail safe: this AP
+         * simply has no idle process to fall back to, which schedule()
+         * already guards against (NULL idle -> just keeps running
+         * whatever's "current", same as if nothing were runnable). */
+        spin_unlock(&g_sched_lock);
+        irq_enable();
+        return;
+    }
+
+    idle->ppid          = 0;
+    idle->state          = PROCESS_STATE_RUNNING;
+    idle->priority       = PRIORITY_LOW;
+    idle->base_priority  = PRIORITY_LOW;
+    idle->quantum_left   = SCHED_QUANTUM_TICKS;
+    idle->page_dir       = vmm_kernel_directory();
+    idle->is_idle        = 1;
+    copy_name(idle, "idle");
+
+    g_cpu_locals[cpu_id].proc = idle;
+    g_cpu_locals[cpu_id].idle = idle;
+
+    spin_unlock(&g_sched_lock);
+    irq_enable();
 }
 
 /* ------------------------------------------------------------------ */
@@ -115,6 +162,21 @@ void process_init(void) {
 /* Landing pad if a thread's entry function returns. */
 static void process_thread_exit(void) {
     process_exit(0);
+}
+
+/* First C code a brand-new kernel thread ever runs (see file header
+ * comment). Never called directly - only ever reached via
+ * context_switch()'s `ret` landing on the address process_create()
+ * stashed at the top of a fresh kernel stack. */
+static void kthread_launch(void) {
+    finish_switch();
+
+    process_t *self = current_process;
+    process_entry_t entry = self->pending_entry;
+    void *arg = self->pending_arg;
+
+    entry(arg);
+    process_thread_exit();
 }
 
 process_t *process_create(const char *name, process_entry_t entry,
@@ -129,9 +191,11 @@ process_t *process_create(const char *name, process_entry_t entry,
     }
 
     irq_disable();
+    spin_lock(&g_sched_lock);
 
     process_t *p = alloc_pcb();
     if (!p) {
+        spin_unlock(&g_sched_lock);
         irq_enable();
         kfree(stack);
         return 0;
@@ -148,12 +212,12 @@ process_t *process_create(const char *name, process_entry_t entry,
     /* Kernel threads share the kernel's address space directly; only user
      * processes (process_create_user, below) get their own directory. */
     p->page_dir      = vmm_kernel_directory();
+    p->pending_entry = entry;
+    p->pending_arg   = arg;
 
     /* Build the initial kernel stack frame (see file header comment). */
     uint32_t *sp = (uint32_t *)p->kstack_top;
-    *(--sp) = (uint32_t)arg;                  /* entry's argument        */
-    *(--sp) = (uint32_t)process_thread_exit;  /* entry's return address  */
-    *(--sp) = (uint32_t)entry;                /* context_switch target   */
+    *(--sp) = (uint32_t)kthread_launch;       /* context_switch target   */
     *(--sp) = 0x202;                          /* EFLAGS (IF = 1)         */
     *(--sp) = 0;                              /* EBP                     */
     *(--sp) = 0;                              /* EBX                     */
@@ -164,6 +228,7 @@ process_t *process_create(const char *name, process_entry_t entry,
     p->state = PROCESS_STATE_READY;
     scheduler_enqueue(p);
 
+    spin_unlock(&g_sched_lock);
     irq_enable();
     return p;
 }
@@ -255,17 +320,35 @@ static void free_ustack_pages(process_t *p) {
     }
 }
 
+/* Mirror of free_ustack_pages() for the physical pages backing an
+ * exec()'d ELF image (kernel/exec.c), if this process ever called
+ * exec(). Safe no-op for processes that never did. */
+static void free_exec_pages(process_t *p) {
+    if (!p->exec_pages) return;
+    for (uint32_t i = 0; i < p->exec_page_count; i++) {
+        if (p->exec_pages[i].phys) {
+            pmm_free_page((void *)p->exec_pages[i].phys);
+        }
+    }
+    kfree(p->exec_pages);
+    p->exec_pages = 0;
+    p->exec_page_count = 0;
+}
+
 void process_exit(int code) {
     irq_disable();
+    spin_lock(&g_sched_lock);
 
     process_t *self = current_process;
 
     self->exit_code = code;
     self->state     = PROCESS_STATE_ZOMBIE;
 
-    /* User stack can be freed now; the kernel stack is still in use
-     * until we have switched away, so the reaper frees it later. */
+    /* User stack (and any exec()'d image) can be freed now; the kernel
+     * stack is still in use until we have switched away, so the reaper
+     * frees it later. */
     free_ustack_pages(self);
+    free_exec_pages(self);
 
     /* Wake a parent blocked in process_wait(). */
     process_t *parent = process_by_pid(self->ppid);
@@ -274,7 +357,9 @@ void process_exit(int code) {
         scheduler_unblock(parent);
     }
 
-    schedule();
+    schedule();   /* Never returns for this call frame; g_sched_lock is
+                   * released via finish_switch() on whichever process
+                   * resumes next - see scheduler.c. */
 
     /* Unreachable */
     for (;;) {
@@ -283,20 +368,19 @@ void process_exit(int code) {
 }
 
 int process_kill(uint32_t pid) {
-    if (pid == 0) {
-        return -1;  /* Cannot kill the idle process */
-    }
-
     irq_disable();
+    spin_lock(&g_sched_lock);
 
     process_t *p = process_by_pid(pid);
-    if (!p || p->state == PROCESS_STATE_UNUSED ||
+    if (!p || p->is_idle || p->state == PROCESS_STATE_UNUSED ||
         p->state == PROCESS_STATE_ZOMBIE) {
+        spin_unlock(&g_sched_lock);
         irq_enable();
         return -1;
     }
 
     if (p == current_process) {
+        spin_unlock(&g_sched_lock);
         irq_enable();
         process_exit(-1);           /* Never returns */
     }
@@ -307,6 +391,7 @@ int process_kill(uint32_t pid) {
     p->state     = PROCESS_STATE_ZOMBIE;
 
     free_ustack_pages(p);
+    free_exec_pages(p);
 
     /* Wake a waiting parent, as in process_exit(). */
     process_t *parent = process_by_pid(p->ppid);
@@ -315,6 +400,7 @@ int process_kill(uint32_t pid) {
         scheduler_unblock(parent);
     }
 
+    spin_unlock(&g_sched_lock);
     irq_enable();
     return 0;
 }
@@ -322,6 +408,7 @@ int process_kill(uint32_t pid) {
 int process_wait(int *status) {
     for (;;) {
         irq_disable();
+        spin_lock(&g_sched_lock);
 
         int have_children = 0;
         for (int i = 0; i < PROCESS_MAX; i++) {
@@ -334,12 +421,14 @@ int process_wait(int *status) {
                 int pid = (int)p->pid;
                 if (status) *status = p->exit_code;
                 process_release(p);      /* Reap: frees stacks, slot   */
+                spin_unlock(&g_sched_lock);
                 irq_enable();
                 return pid;
             }
         }
 
         if (!have_children) {
+            spin_unlock(&g_sched_lock);
             irq_enable();
             return -1;
         }
@@ -347,7 +436,9 @@ int process_wait(int *status) {
         /* Block until a child exits. */
         current_process->parent_waiting = 1;
         current_process->state = PROCESS_STATE_BLOCKED;
-        scheduler_block_current();
+        scheduler_block_current();   /* g_sched_lock released via
+                                       * finish_switch() by the time this
+                                       * returns - see scheduler.c. */
         current_process->parent_waiting = 0;
         irq_enable();
     }
@@ -360,12 +451,13 @@ void process_sleep(uint32_t ms) {
     }
 
     irq_disable();
+    spin_lock(&g_sched_lock);
 
     /* 100 Hz timer -> 10 ms per tick; round up. */
     uint64_t ticks = (ms + 9) / 10;
     current_process->sleep_until = timer_get_ticks() + ticks;
     current_process->state = PROCESS_STATE_SLEEPING;
-    scheduler_block_current();
+    scheduler_block_current();   /* releases g_sched_lock - see above */
 
     irq_enable();
 }
@@ -374,6 +466,14 @@ void process_sleep(uint32_t ms) {
 /* Queries / bookkeeping                                                */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Lock-free by design: these are simple reads used both by already-locked
+ * callers above (safe: reading under a lock you already hold is always
+ * fine) and by unlocked callers like the `ps`/`sched` shell commands
+ * (display-only - the same benign eventual-consistency the single-CPU
+ * version of this code already tolerated, e.g. a process shown as
+ * "running" that exited a moment ago).
+ */
 process_t *process_current(void)  { return current_process; }
 uint32_t   process_getpid(void)   { return current_process ? current_process->pid : 0; }
 uint32_t   process_getppid(void)  { return current_process ? current_process->ppid : 0; }

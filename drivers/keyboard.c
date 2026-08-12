@@ -90,12 +90,82 @@ static char input_buffer[INPUT_BUFFER_SIZE];
 static volatile size_t input_buffer_pos = 0;
 static volatile uint8_t line_ready = 0;
 
+/*
+ * Command history: up/down arrow recall for the shared input line editor
+ * (used by both the interactive shell prompt and any process's read() -
+ * see kernel/syscall.c's sys_read() comment on why there's only one shared
+ * buffer). Raw make-code scan codes, not ASCII - scancode_to_ascii[]/
+ * scancode_to_ascii_shift[] both map these to 0 and are never consulted
+ * for them.
+ */
+#define SCANCODE_UP   0x48
+#define SCANCODE_DOWN 0x50
+#define HISTORY_SIZE  16
+static char     history[HISTORY_SIZE][INPUT_BUFFER_SIZE];
+static uint32_t history_count = 0;   /* total lines ever stored (monotonic) */
+static int      history_browse = -1; /* -1 = fresh/not browsing; else a logical
+                                       * index in [0, history_count) */
+
 /* Initialize keyboard */
 void keyboard_init(void) {
     /* Enable keyboard interrupt (IRQ1) */
     uint8_t mask = inb(PIC1_DATA);
     mask &= ~(1 << 1);  /* Clear bit 1 to enable IRQ1 */
     outb(PIC1_DATA, mask);
+}
+
+/*
+ * Recall the previous (up=1) or next (up=0) history entry into the
+ * in-progress input_buffer, erasing and redrawing whatever is currently on
+ * screen. Called only from keyboard_handler() (IRQ context) - no
+ * allocation, static storage only, same constraints as the rest of this
+ * file.
+ */
+static void keyboard_history_recall(int up) {
+    if (history_count == 0) {
+        return;
+    }
+
+    /* Oldest entry still resident in the ring; earlier ones were
+     * overwritten once the ring wrapped. */
+    uint32_t oldest = (history_count > HISTORY_SIZE) ? (history_count - HISTORY_SIZE) : 0;
+
+    if (up) {
+        if (history_browse == -1) {
+            history_browse = (int)(history_count - 1);
+        } else if ((uint32_t)history_browse > oldest) {
+            history_browse--;
+        } else {
+            return;   /* already at the oldest entry */
+        }
+    } else {
+        if (history_browse == -1) {
+            return;   /* nothing "newer" than a fresh line */
+        } else if ((uint32_t)history_browse < history_count - 1) {
+            history_browse++;
+        } else {
+            history_browse = -1;   /* past the newest: back to a fresh, empty line */
+        }
+    }
+
+    /* Erase whatever is currently in the buffer and on screen. */
+    while (input_buffer_pos > 0) {
+        input_buffer_pos--;
+        terminal_backspace();
+    }
+
+    if (history_browse == -1) {
+        return;   /* fresh line - nothing more to draw */
+    }
+
+    const char *line = history[(uint32_t)history_browse % HISTORY_SIZE];
+    size_t len = 0;
+    while (line[len] != '\0' && len < INPUT_BUFFER_SIZE - 1) {
+        input_buffer[len] = line[len];
+        terminal_put_char(line[len]);
+        len++;
+    }
+    input_buffer_pos = len;
 }
 
 /* Keyboard interrupt handler */
@@ -122,6 +192,10 @@ void keyboard_handler(void) {
         /* Check for caps lock */
         else if (scancode == 0x3A) {
             caps_lock = !caps_lock;
+        }
+        /* History recall */
+        else if (scancode == SCANCODE_UP || scancode == SCANCODE_DOWN) {
+            keyboard_history_recall(scancode == SCANCODE_UP);
         }
         /* Regular key press */
         else {
@@ -159,6 +233,16 @@ void keyboard_handler(void) {
                 /* Enter */
                 terminal_put_char('\n');
                 input_buffer[input_buffer_pos] = '\0';
+                if (input_buffer_pos > 0) {
+                    char *slot = history[history_count % HISTORY_SIZE];
+                    size_t i;
+                    for (i = 0; i < input_buffer_pos && i < INPUT_BUFFER_SIZE - 1; i++) {
+                        slot[i] = input_buffer[i];
+                    }
+                    slot[i] = '\0';
+                    history_count++;
+                }
+                history_browse = -1;
                 line_ready = 1;
             } else if (ascii != 0) {
                 /* Regular character */
@@ -185,6 +269,7 @@ void keyboard_get_line(char* buffer, size_t max_len) {
     __asm__ __volatile__("cli");
     input_buffer_pos = 0;
     line_ready = 0;
+    history_browse = -1;
     __asm__ __volatile__("sti");
     
     /* Wait for line to be ready (interrupts must be enabled) */

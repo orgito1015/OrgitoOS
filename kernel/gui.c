@@ -6,6 +6,7 @@
 #include "console.h"
 #include "string.h"
 #include "../memory/heap.h"
+#include "../drivers/framebuffer.h"
 
 /* Global GUI state */
 static gui_state_t gui;
@@ -205,4 +206,14 @@ void gui_clear_screen(uint32_t color) {
     for (int i = 0; i < gui.width * gui.height; i++) {
         gui.framebuffer[i] = color;
     }
+}
+
+/* Blit the simulated framebuffer onto the real one, if active */
+void gui_flip_to_screen(void) {
+    if (!fb_is_active()) {
+        console_write("GUI: no real framebuffer active, nothing to flip\n");
+        return;
+    }
+    fb_blit_argb_buffer(gui.framebuffer, (uint32_t)gui.width, (uint32_t)gui.height);
+    console_write("GUI: flipped simulated framebuffer to the real display\n");
 }

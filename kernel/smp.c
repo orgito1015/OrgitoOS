@@ -1,16 +1,55 @@
 /*
  * OrgitoOS - SMP Implementation
+ *
+ * CPU *detection* (below, via CPUID and now ACPI's MADT) is the easy
+ * half of SMP. Actually booting an Application Processor needs three
+ * more pieces working together:
+ *
+ *   1. kernel/apic.c - parse ACPI to find the MADT's list of Local APIC
+ *      IDs and the Local APIC's MMIO base, then drive the Local APIC to
+ *      send the INIT-SIPI-SIPI sequence that wakes a given AP.
+ *   2. arch/x86/trampoline.S - the AP wakes in 16-bit real mode at a
+ *      fixed low physical address; this is the hand-written code that
+ *      gets it into 32-bit protected mode with paging on, sharing the
+ *      BSP's own page directory.
+ *   3. ap_entry(), below - where the trampoline hands off to C: loads
+ *      the shared GDT/IDT, enables this core's Local APIC, marks itself
+ *      online, and parks in a `cli; hlt` loop (no per-CPU scheduler
+ *      exists yet - see docs/roadmap/roadmap.md - so an AP staying
+ *      parked after proving it booted is the honest scope here).
+ *
+ * APs are booted strictly one at a time: the BSP pokes one shared
+ * "mailbox" (see AP_MAILBOX_* below) with this AP's boot parameters,
+ * sends its SIPI, and polls for it to mark itself online (or time out)
+ * before moving on to the next. That sidesteps every real concurrency
+ * question a fully parallel bring-up would raise (two APs racing to
+ * read the same mailbox, two APs writing the console at once, ...) at
+ * the cost of a slower boot - fine for the handful of cores a hobbyist
+ * VM exposes.
  */
 
 #include "smp.h"
+#include "apic.h"
 #include "console.h"
 #include "string.h"
+#include "kernel.h"
+#include "../arch/x86/gdt.h"
+#include "../arch/x86/idt.h"
+#include "../arch/x86/isr.h"
+#include "../drivers/timer.h"
+#include "../memory/heap.h"
+#include "../memory/vmm.h"
+#include "../process/process.h"
 
 /* Global SMP information */
 static smp_info_t smp_system;
 static int smp_initialized = 0;
 
-/* CPUID detection helper */
+/* ------------------------------------------------------------------ */
+/* CPUID-based logical processor count (informational only - see       */
+/* smp_init(): actual topology/bring-up now comes from ACPI's MADT).   */
+/* ------------------------------------------------------------------ */
+
 static inline int cpuid_available(void) {
     uint32_t eax, edx;
     __asm__ volatile (
@@ -27,119 +66,295 @@ static inline int cpuid_available(void) {
     return (eax != edx);
 }
 
-/* Get CPUID information */
 static inline void cpuid(uint32_t code, uint32_t* a, uint32_t* d) {
     __asm__ volatile ("cpuid" : "=a"(*a), "=d"(*d) : "a"(code) : "ebx", "ecx");
 }
 
-/* Detect number of CPUs */
-static uint32_t detect_cpu_count(void) {
+static uint32_t detect_cpu_count_cpuid(void) {
     if (!cpuid_available()) {
-        return 1; /* CPUID not available, assume single CPU */
+        return 1;
     }
-    
+
     uint32_t eax, edx;
     cpuid(1, &eax, &edx);
-    
-    /* Check for multi-threading support */
+
     if (edx & (1 << 28)) {
-        /* HTT bit is set, check logical processor count
-         * Note: This returns the maximum number of addressable IDs for logical
-         * processors in this physical package. This may include hyper-threading
-         * logical processors, not just physical cores. For a more accurate
-         * physical core count, CPUID leaf 0x0B or 0x1F would be needed.
-         */
         uint32_t logical_count = (edx >> 16) & 0xFF;
         if (logical_count > 1) {
             return logical_count;
         }
     }
-    
-    return 1; /* Single CPU */
+
+    return 1;
 }
 
-/* Initialize SMP subsystem */
+/* ------------------------------------------------------------------ */
+/* AP boot: trampoline placement and mailbox                            */
+/* ------------------------------------------------------------------ */
+
+/* Embedded AP trampoline (arch/x86/trampoline.S), built and objcopy'd
+ * into a flat blob by the Makefile's trampoline rules - see the
+ * comment on the userland rules for the identical technique. */
+extern uint8_t _binary_trampoline_bin_start[];
+extern uint8_t _binary_trampoline_bin_end[];
+
+/* Physical address the trampoline is linked for (arch/x86/trampoline.ld)
+ * and copied to before any SIPI is sent. Must stay in sync with that
+ * file's `. = 0x8000`. The SIPI vector byte is this address >> 12. */
+#define AP_TRAMPOLINE_PHYS 0x8000u
+
+/*
+ * Fixed scratch addresses below the trampoline that arch/x86/trampoline.S
+ * reads as plain absolute memory operands (`mov 0x7FF0, %eax` - no
+ * relocation, no symbol lookup) to learn this boot's page directory,
+ * stack, and C entry point. Not part of the trampoline blob itself
+ * (which is stripped of symbols by `objcopy -O binary`, so its own
+ * internal labels aren't visible to C) - a handful of hard-coded
+ * addresses shared only by convention between the two files is far
+ * simpler than trying to recover symbol offsets from a stripped blob.
+ * MUST match arch/x86/trampoline.S's AP_MAILBOX_* .set values exactly.
+ */
+#define AP_MAILBOX_PAGEDIR 0x7FF0u
+#define AP_MAILBOX_STACK   0x7FF4u
+#define AP_MAILBOX_ENTRY   0x7FF8u
+
+#define AP_STACK_SIZE 16384u
+
+static void write_dec(uint32_t v) {
+    char buf[12];
+    itoa((int)v, buf, 10);
+    console_write(buf);
+}
+
+/*
+ * C entry point for every Application Processor, reached via a bare
+ * `jmp` (not `call`) from arch/x86/trampoline.S once it has paging on
+ * and is running with the BSP's own page directory - so this function,
+ * an ordinary address inside the kernel image above 1 MiB, is already
+ * mapped and executable exactly like it is for the BSP.
+ */
+static void ap_entry(void) __attribute__((noreturn));
+
+static void ap_entry(void) {
+    /* Load the already-built kernel GDT/IDT (shared, not rebuilt per
+     * CPU) - gdt_flush() also reloads every segment register, including
+     * CS via a far jump, matching what gdt_init() does for the BSP.
+     * TSS is loaded separately below, once this AP knows its own CPU
+     * index - each CPU has its own TSS descriptor now (arch/x86/gdt.h),
+     * avoiding the old single-shared-TSS "busy bit" hazard entirely. */
+    gdt_flush(gdt_get_ptr_addr());
+    idt_reload();
+
+    lapic_enable();
+
+    uint32_t my_apic_id = lapic_id();
+    uint32_t my_index = MAX_CPUS;   /* sentinel: not found */
+    for (uint32_t i = 0; i < smp_system.cpu_count; i++) {
+        if (smp_system.cpus[i].apic_id == my_apic_id) {
+            smp_system.cpus[i].state = CPU_STATE_ONLINE;
+            my_index = i;
+            console_write("SMP: CPU ");
+            write_dec(i);
+            console_write(" (APIC ID ");
+            write_dec(my_apic_id);
+            console_write(") is up\n");
+            break;
+        }
+    }
+
+    if (my_index == MAX_CPUS) {
+        /* This AP's own APIC ID wasn't in the MADT list it was booted
+         * from - should not happen, but park safely rather than run
+         * with no assigned CPU index (tss_flush_for_cpu()/
+         * process_init_ap()/smp_get_current_cpu() all need one). */
+        for (;;) {
+            __asm__ __volatile__("cli; hlt");
+        }
+    }
+
+    /*
+     * Give this CPU everything schedule() needs to actually run
+     * processes on it: its own TSS (for ring 3 -> 0 transitions), its
+     * own dedicated idle process, and its own preemption source (the
+     * LAPIC's periodic timer - legacy PIC IRQs are never routed here,
+     * only ever to the BSP, so this is the only interrupt source this
+     * CPU has for scheduling). See process/scheduler.h's file header.
+     */
+    tss_flush_for_cpu(my_index);
+    process_init_ap(my_index);
+    lapic_timer_start();
+
+    console_write("SMP: CPU ");
+    write_dec(my_index);
+    console_write(" scheduling active\n");
+
+    __asm__ __volatile__("sti");
+    for (;;) {
+        __asm__ __volatile__("hlt");
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* Public API                                                           */
+/* ------------------------------------------------------------------ */
+
 void smp_init(void) {
     if (smp_initialized) return;
-    
+
     console_write("SMP: Detecting CPUs...\n");
-    
-    /* Initialize SMP structure */
-    smp_system.cpu_count = detect_cpu_count();
-    smp_system.bsp_id = 0; /* BSP is always CPU 0 */
-    
-    /* Initialize CPU info structures */
+
     for (uint32_t i = 0; i < MAX_CPUS; i++) {
-        smp_system.cpus[i].cpu_id = i;
-        smp_system.cpus[i].state = CPU_STATE_OFFLINE;
+        smp_system.cpus[i].cpu_id  = i;
+        smp_system.cpus[i].state   = CPU_STATE_OFFLINE;
         smp_system.cpus[i].apic_id = i;
-        smp_system.cpus[i].flags = 0;
+        smp_system.cpus[i].flags   = 0;
         smp_system.cpus[i].tsc_freq = 0;
     }
-    
-    /* Mark BSP as online */
-    smp_system.cpus[0].state = CPU_STATE_ONLINE;
-    
-    /* Print detection results */
+
+    uint32_t cpuid_count = detect_cpu_count_cpuid();
+    console_write("SMP: CPUID reports ");
+    write_dec(cpuid_count);
+    console_write(" logical processor(s) (informational)\n");
+
+    uint32_t apic_ids[MAX_CPUS];
+    uint32_t lapic_phys = 0;
+    uint32_t found = acpi_collect_local_apic_ids(apic_ids, MAX_CPUS, &lapic_phys);
+
+    if (found == 0) {
+        /* No usable ACPI MADT (non-ACPI BIOS, or parsing failed) -
+         * fall back to single-CPU, same externally-visible behavior as
+         * before this file gained real APIC support. */
+        smp_system.cpu_count    = 1;
+        smp_system.bsp_id       = 0;
+        smp_system.cpus[0].apic_id = 0;
+        smp_system.cpus[0].state  = CPU_STATE_ONLINE;
+        console_write("SMP: running single-CPU (no usable ACPI MADT)\n");
+        smp_initialized = 1;
+        return;
+    }
+
+    lapic_init(lapic_phys);
+    uint32_t bsp_apic_id = lapic_id();
+
+    /*
+     * Calibrate the LAPIC timer and install its IDT gate now, before any
+     * AP is booted below - ap_entry() calls lapic_timer_start() as part
+     * of its own bring-up, which needs a real calibrated count already
+     * available (lapic_timer_start() safely no-ops otherwise, but then
+     * that AP would never get a working preemption source - see
+     * kernel/apic.c). Skipped when there's only one CPU total: harmless
+     * either way, but pointless with no APs to hand a timer to. */
+    if (found > 1) {
+        idt_set_gate(LAPIC_TIMER_VECTOR, (uint32_t)lapic_timer_handler_stub,
+                     KERNEL_CODE_SEGMENT, IDT_FLAGS_KERNEL);
+        lapic_timer_calibrate();
+    }
+
+    smp_system.cpu_count = found;
+    uint32_t bsp_index = 0;
+    for (uint32_t i = 0; i < found; i++) {
+        smp_system.cpus[i].cpu_id  = i;
+        smp_system.cpus[i].apic_id = apic_ids[i];
+        smp_system.cpus[i].state   = CPU_STATE_OFFLINE;
+        if (apic_ids[i] == bsp_apic_id) {
+            bsp_index = i;
+        }
+    }
+    smp_system.bsp_id = bsp_index;
+    smp_system.cpus[bsp_index].state = CPU_STATE_ONLINE;
+
     console_write("SMP: Detected ");
-    char buf[16];
-    itoa(smp_system.cpu_count, buf, 10);
-    console_write(buf);
-    console_write(" CPU(s)\n");
-    
+    write_dec(found);
+    console_write(" CPU(s) via ACPI MADT (BSP = APIC ID ");
+    write_dec(bsp_apic_id);
+    console_write(")\n");
+
+    /* Copy the AP trampoline to its fixed launch address once; every AP
+     * boots through this same copy (arch/x86/trampoline.S). */
+    uint32_t tramp_size = (uint32_t)(_binary_trampoline_bin_end - _binary_trampoline_bin_start);
+    memcpy((void *)AP_TRAMPOLINE_PHYS, _binary_trampoline_bin_start, tramp_size);
+
     smp_initialized = 1;
+
+    /* Bring up every detected AP. Sequential by construction - see the
+     * file header comment on why that's the deliberate design here,
+     * not just a leftover TODO. */
+    for (uint32_t i = 0; i < found; i++) {
+        if (i == bsp_index) continue;
+        smp_boot_ap(i);
+    }
 }
 
-/* Get number of CPUs */
 uint32_t smp_get_cpu_count(void) {
     return smp_system.cpu_count;
 }
 
-/* Get current CPU ID (simplified - always return 0 for now) */
 uint32_t smp_get_current_cpu(void) {
-    /* TODO: Read from APIC 
-     * Currently always returns BSP (Bootstrap Processor) ID of 0.
-     * This is safe for single-threaded operation but means:
-     * - All code executes on CPU 0
-     * - Per-CPU data structures are not utilized
-     * - CPU affinity cannot be enforced
-     * Once APIC is implemented, this should read the local APIC ID.
-     */
+    if (smp_system.cpu_count <= 1) {
+        return 0;   /* Single-CPU fallback path never mapped the LAPIC. */
+    }
+    uint32_t id = lapic_id();
+    for (uint32_t i = 0; i < smp_system.cpu_count; i++) {
+        if (smp_system.cpus[i].apic_id == id) {
+            return i;
+        }
+    }
     return 0;
 }
 
-/* Get CPU info */
 cpu_info_t* smp_get_cpu_info(uint32_t cpu_id) {
     if (cpu_id >= MAX_CPUS) return NULL;
     return &smp_system.cpus[cpu_id];
 }
 
-/* Boot Application Processor */
 int smp_boot_ap(uint32_t cpu_id) {
-    if (cpu_id >= smp_system.cpu_count || cpu_id == 0) {
-        return -1; /* Invalid CPU ID or trying to boot BSP */
+    if (cpu_id >= smp_system.cpu_count || cpu_id == smp_system.bsp_id) {
+        return -1;
     }
-    
-    /* TODO: Implement AP boot sequence with APIC */
-    smp_system.cpus[cpu_id].state = CPU_STATE_ONLINE;
-    
-    console_write("SMP: Booted CPU ");
-    char buf[16];
-    itoa(cpu_id, buf, 10);
-    console_write(buf);
-    console_write("\n");
-    
-    return 0;
+    if (smp_system.cpus[cpu_id].state == CPU_STATE_ONLINE) {
+        return 0;   /* Already up */
+    }
+
+    uint8_t *stack = (uint8_t *)kmalloc(AP_STACK_SIZE);
+    if (!stack) {
+        console_write("SMP: out of memory allocating AP stack\n");
+        return -1;
+    }
+    uint32_t stack_top = (uint32_t)stack + AP_STACK_SIZE;
+
+    /* Poke the shared mailbox (see the #define block above) - safe
+     * because APs are always booted one at a time. */
+    *(volatile uint32_t *)AP_MAILBOX_PAGEDIR = (uint32_t)vmm_kernel_directory();
+    *(volatile uint32_t *)AP_MAILBOX_STACK   = stack_top;
+    *(volatile uint32_t *)AP_MAILBOX_ENTRY   = (uint32_t)ap_entry;
+
+    lapic_send_init_sipi_sipi(smp_system.cpus[cpu_id].apic_id,
+                              (uint8_t)(AP_TRAMPOLINE_PHYS >> 12));
+
+    /* Poll for ap_entry() to mark itself online. Real hardware and QEMU
+     * both clear this in low single-digit milliseconds; 500 ms is a
+     * generous timeout so a genuinely stuck AP doesn't hang boot
+     * forever. */
+    uint64_t deadline = timer_get_ticks() + 50;   /* 50 ticks @ 100 Hz = 500 ms */
+    while (timer_get_ticks() < deadline) {
+        if (smp_system.cpus[cpu_id].state == CPU_STATE_ONLINE) {
+            return 0;
+        }
+        __asm__ __volatile__("pause");
+    }
+
+    console_write("SMP: CPU ");
+    write_dec(cpu_id);
+    console_write(" failed to come online (timeout)\n");
+    return -1;
 }
 
-/* Halt a CPU */
 void smp_halt_cpu(uint32_t cpu_id) {
     if (cpu_id >= MAX_CPUS) return;
-    
+
     smp_system.cpus[cpu_id].state = CPU_STATE_HALTED;
-    
+
     if (cpu_id == smp_get_current_cpu()) {
-        /* Halt this CPU */
         __asm__ volatile ("cli; hlt");
     }
 }

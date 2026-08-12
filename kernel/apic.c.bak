@@ -1,0 +1,262 @@
+/*
+ * OrgitoOS - ACPI/MADT parsing and Local APIC access.
+ *
+ * Everything here runs with paging on and low memory (<1 MiB, where the
+ * RSDP/RSDT/MADT tables and the Local APIC's default MMIO window live)
+ * identity-mapped by memory/vmm.c, so physical addresses can be read
+ * through ordinary pointers.
+ */
+
+#include "apic.h"
+#include "string.h"
+#include "../drivers/console.h"
+#include "../drivers/timer.h"
+#include "../memory/vmm.h"
+
+/* ------------------------------------------------------------------ */
+/* ACPI tables                                                          */
+/* ------------------------------------------------------------------ */
+
+struct acpi_rsdp {
+    char     signature[8];   /* "RSD PTR " */
+    uint8_t  checksum;
+    char     oem_id[6];
+    uint8_t  revision;
+    uint32_t rsdt_address;
+} __attribute__((packed));
+
+struct acpi_sdt_header {
+    char     signature[4];
+    uint32_t length;
+    uint8_t  revision;
+    uint8_t  checksum;
+    char     oem_id[6];
+    char     oem_table_id[8];
+    uint32_t oem_revision;
+    uint32_t creator_id;
+    uint32_t creator_revision;
+} __attribute__((packed));
+
+/* MADT (signature "APIC") entry type 0: Processor Local APIC */
+struct madt_entry_header {
+    uint8_t type;
+    uint8_t length;
+} __attribute__((packed));
+
+struct madt_local_apic {
+    struct madt_entry_header hdr;
+    uint8_t  acpi_processor_id;
+    uint8_t  apic_id;
+    uint32_t flags;             /* bit 0 = Enabled */
+} __attribute__((packed));
+
+#define MADT_TYPE_LOCAL_APIC 0
+#define MADT_FLAG_ENABLED    (1u << 0)
+
+static uint8_t sum_bytes(const void *p, uint32_t len) {
+    const uint8_t *b = (const uint8_t *)p;
+    uint8_t sum = 0;
+    for (uint32_t i = 0; i < len; i++) sum = (uint8_t)(sum + b[i]);
+    return sum;
+}
+
+static struct acpi_rsdp *scan_for_rsdp(uint32_t start, uint32_t end) {
+    for (uint32_t addr = start; addr + sizeof(struct acpi_rsdp) <= end; addr += 16) {
+        struct acpi_rsdp *r = (struct acpi_rsdp *)addr;
+        if (memcmp(r->signature, "RSD PTR ", 8) == 0) {
+            /* ACPI 1.0 checksum covers the first 20 bytes only. */
+            if (sum_bytes(r, 20) == 0) {
+                return r;
+            }
+        }
+    }
+    return 0;
+}
+
+static struct acpi_rsdp *find_rsdp(void) {
+    /* Extended BIOS Data Area: segment stored as a uint16 at physical
+     * 0x40E; the RSDP, if present there, is in its first 1 KiB.
+     *
+     * GCC's -Warray-bounds mistakes this small, fixed-address pointer
+     * dereference for indexing a zero-size array; it is a well-known
+     * false positive for exactly this kind of low-memory BIOS data
+     * access (harmless, but silenced here rather than left as noise). */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Warray-bounds"
+    uint16_t ebda_seg = *(volatile uint16_t *)(uintptr_t)0x40E;
+#pragma GCC diagnostic pop
+    if (ebda_seg != 0) {
+        uint32_t ebda_addr = (uint32_t)ebda_seg << 4;
+        struct acpi_rsdp *r = scan_for_rsdp(ebda_addr, ebda_addr + 1024);
+        if (r) return r;
+    }
+    /* Standard fallback: the BIOS read-only memory region. */
+    return scan_for_rsdp(0xE0000, 0x100000);
+}
+
+uint32_t acpi_collect_local_apic_ids(uint32_t *out_apic_ids, uint32_t max,
+                                      uint32_t *out_lapic_phys) {
+    struct acpi_rsdp *rsdp = find_rsdp();
+    if (!rsdp) {
+        console_write("ACPI: no RSDP found (non-ACPI BIOS?) - single-CPU only\n");
+        return 0;
+    }
+
+    struct acpi_sdt_header *rsdt = (struct acpi_sdt_header *)(uintptr_t)rsdp->rsdt_address;
+    if (memcmp(rsdt->signature, "RSDT", 4) != 0 ||
+        sum_bytes(rsdt, rsdt->length) != 0) {
+        console_write("ACPI: RSDT missing or corrupt\n");
+        return 0;
+    }
+
+    uint32_t *entries = (uint32_t *)((uint8_t *)rsdt + sizeof(struct acpi_sdt_header));
+    uint32_t entry_count = (rsdt->length - sizeof(struct acpi_sdt_header)) / 4;
+
+    struct acpi_sdt_header *madt = 0;
+    for (uint32_t i = 0; i < entry_count; i++) {
+        struct acpi_sdt_header *cand = (struct acpi_sdt_header *)(uintptr_t)entries[i];
+        if (memcmp(cand->signature, "APIC", 4) == 0 && sum_bytes(cand, cand->length) == 0) {
+            madt = cand;
+            break;
+        }
+    }
+    if (!madt) {
+        console_write("ACPI: MADT (APIC table) not found\n");
+        return 0;
+    }
+
+    uint8_t *madt_body = (uint8_t *)madt + sizeof(struct acpi_sdt_header);
+    uint32_t lapic_phys = *(uint32_t *)madt_body;
+    if (out_lapic_phys) *out_lapic_phys = lapic_phys;
+
+    uint8_t *p = madt_body + 8;  /* skip local_apic_address + flags */
+    uint8_t *end = (uint8_t *)madt + madt->length;
+
+    uint32_t found = 0;
+    while (p + sizeof(struct madt_entry_header) <= end) {
+        struct madt_entry_header *eh = (struct madt_entry_header *)p;
+        if (eh->length == 0) break;   /* malformed; avoid an infinite loop */
+
+        if (eh->type == MADT_TYPE_LOCAL_APIC && eh->length >= sizeof(struct madt_local_apic)) {
+            struct madt_local_apic *la = (struct madt_local_apic *)p;
+            if ((la->flags & MADT_FLAG_ENABLED) && found < max) {
+                out_apic_ids[found++] = la->apic_id;
+            }
+        }
+        p += eh->length;
+    }
+
+    return found;
+}
+
+/* ------------------------------------------------------------------ */
+/* Local APIC (xAPIC, MMIO)                                             */
+/* ------------------------------------------------------------------ */
+
+#define LAPIC_REG_ID       0x020
+#define LAPIC_REG_VERSION  0x030
+#define LAPIC_REG_TPR      0x080
+#define LAPIC_REG_EOI      0x0B0
+#define LAPIC_REG_SVR      0x0F0
+#define LAPIC_REG_ICR_LOW  0x300
+#define LAPIC_REG_ICR_HIGH 0x310
+
+#define IA32_APIC_BASE_MSR 0x1B
+#define APIC_BASE_ENABLE   (1u << 11)
+
+static volatile uint32_t *lapic_base = 0;
+
+static inline uint32_t lapic_read(uint32_t reg) {
+    return lapic_base[reg / 4];
+}
+
+static inline void lapic_write(uint32_t reg, uint32_t value) {
+    lapic_base[reg / 4] = value;
+}
+
+static inline void rdmsr(uint32_t msr, uint32_t *lo, uint32_t *hi) {
+    __asm__ __volatile__("rdmsr" : "=a"(*lo), "=d"(*hi) : "c"(msr));
+}
+
+static inline void wrmsr(uint32_t msr, uint32_t lo, uint32_t hi) {
+    __asm__ __volatile__("wrmsr" : : "c"(msr), "a"(lo), "d"(hi));
+}
+
+void lapic_init(uint32_t lapic_phys) {
+    /* MMIO, well above the kernel's 64 MiB identity-map cap
+     * (memory/vmm.c vmm_init), so it needs its own explicit mapping -
+     * uncached, supervisor-only, identity (virt == phys) like every
+     * other kernel mapping in this codebase. */
+    vmm_map_page(vmm_kernel_directory(), (void *)(uintptr_t)lapic_phys, lapic_phys,
+                 PTE_PRESENT | PTE_WRITABLE | PTE_NOCACHE);
+    lapic_base = (volatile uint32_t *)(uintptr_t)lapic_phys;
+
+    /* Make sure the Local APIC is globally enabled (it is by default on
+     * real hardware and QEMU, but cheap to guarantee). Preserve the base
+     * address field - MADT and the MSR should already agree, but the MSR
+     * is authoritative for where the CPU itself will decode MMIO. */
+    uint32_t lo, hi;
+    rdmsr(IA32_APIC_BASE_MSR, &lo, &hi);
+    lo |= APIC_BASE_ENABLE;
+    wrmsr(IA32_APIC_BASE_MSR, lo, hi);
+
+    lapic_enable();
+
+    console_write("APIC: Local APIC MMIO mapped at 0x");
+    {
+        char buf[12];
+        itoa((int)lapic_phys, buf, 16);
+        console_write(buf);
+    }
+    console_write("\n");
+}
+
+uint32_t lapic_id(void) {
+    /* Bits 24-31 hold the APIC ID in xAPIC mode. */
+    return lapic_read(LAPIC_REG_ID) >> 24;
+}
+
+void lapic_enable(void) {
+    /* Software-enable (bit 8) + spurious vector 0xFF. Every CPU (BSP and
+     * each AP) must do this for itself - it is per-core state, not
+     * shared through the MMIO window's contents. */
+    lapic_write(LAPIC_REG_SVR, lapic_read(LAPIC_REG_SVR) | 0x1FF);
+}
+
+static void apic_delay_ms(uint32_t ms) {
+    uint64_t target = timer_get_ticks() + (ms + 9) / 10;  /* 100 Hz -> 10 ms/tick */
+    while (timer_get_ticks() < target) {
+        __asm__ __volatile__("pause");
+    }
+}
+
+static void icr_wait_idle(void) {
+    /* Delivery status, bit 12: 1 while the IPI is still being sent. A
+     * bounded spin - if the APIC is somehow wedged, don't hang forever. */
+    for (int i = 0; i < 1000000; i++) {
+        if ((lapic_read(LAPIC_REG_ICR_LOW) & (1u << 12)) == 0) return;
+    }
+}
+
+void lapic_send_init_sipi_sipi(uint32_t dest_apic_id, uint8_t vector) {
+    /* INIT IPI (assert) */
+    lapic_write(LAPIC_REG_ICR_HIGH, dest_apic_id << 24);
+    lapic_write(LAPIC_REG_ICR_LOW, 0x00004500u);
+    icr_wait_idle();
+
+    /* INIT IPI (de-assert) - classic MP spec sequence for older CPUs;
+     * harmless on anything that ignores it. */
+    lapic_write(LAPIC_REG_ICR_HIGH, dest_apic_id << 24);
+    lapic_write(LAPIC_REG_ICR_LOW, 0x00008500u);
+    icr_wait_idle();
+
+    apic_delay_ms(10);
+
+    /* Two STARTUP IPIs (SIPI), per spec - some CPUs need the second. */
+    for (int i = 0; i < 2; i++) {
+        lapic_write(LAPIC_REG_ICR_HIGH, dest_apic_id << 24);
+        lapic_write(LAPIC_REG_ICR_LOW, 0x00004600u | vector);
+        icr_wait_idle();
+        apic_delay_ms(1);
+    }
+}

@@ -10,6 +10,7 @@
 /* External C handlers */
 .extern keyboard_handler
 .extern timer_handler
+.extern lapic_timer_handler
 
 /* IRQ0 (Timer) handler */
 .global irq0_handler
@@ -80,6 +81,90 @@ irq1_handler:
     
     /* Return from interrupt */
     iret
+
+/*
+ * LAPIC timer handler (kernel/apic.c LAPIC_TIMER_VECTOR = 0x40) - the
+ * per-CPU preemption source for Application Processors (process/
+ * scheduler.h: the BSP still uses IRQ0/the PIT above). Not a legacy
+ * PIC-routed IRQ at all (no IRQ number, no PIC EOI - kernel/apic.c's
+ * handler sends the LAPIC's own EOI instead), so it gets its own plain
+ * stub rather than joining the IRQ_STUB macro below.
+ */
+.global lapic_timer_handler_stub
+.type lapic_timer_handler_stub, @function
+lapic_timer_handler_stub:
+    pusha
+    push %ds
+    push %es
+    push %fs
+    push %gs
+
+    mov $KERNEL_DATA_SEGMENT, %ax
+    mov %ax, %ds
+    mov %ax, %es
+    mov %ax, %fs
+    mov %ax, %gs
+
+    call lapic_timer_handler
+
+    pop %gs
+    pop %fs
+    pop %es
+    pop %ds
+    popa
+    iret
+
+/*
+ * Generic IRQ2-15 stubs, for device drivers whose IRQ line isn't known
+ * until runtime (e.g. read from PCI config space) - unlike IRQ0/timer
+ * and IRQ1/keyboard above, which get a fixed, dedicated handler each.
+ * All fourteen share one C-level dispatcher (arch/x86/irq.c
+ * irq_generic_dispatch), parameterized by IRQ number.
+ */
+.extern irq_generic_dispatch
+
+.macro IRQ_STUB num
+.global irq\num\()_handler
+.type irq\num\()_handler, @function
+irq\num\()_handler:
+    pusha
+    push %ds
+    push %es
+    push %fs
+    push %gs
+
+    mov $KERNEL_DATA_SEGMENT, %ax
+    mov %ax, %ds
+    mov %ax, %es
+    mov %ax, %fs
+    mov %ax, %gs
+
+    push $\num
+    call irq_generic_dispatch
+    add $4, %esp
+
+    pop %gs
+    pop %fs
+    pop %es
+    pop %ds
+    popa
+    iret
+.endm
+
+IRQ_STUB 2
+IRQ_STUB 3
+IRQ_STUB 4
+IRQ_STUB 5
+IRQ_STUB 6
+IRQ_STUB 7
+IRQ_STUB 8
+IRQ_STUB 9
+IRQ_STUB 10
+IRQ_STUB 11
+IRQ_STUB 12
+IRQ_STUB 13
+IRQ_STUB 14
+IRQ_STUB 15
 
 /* IDT load function */
 .global idt_load

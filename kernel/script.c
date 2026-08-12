@@ -6,6 +6,7 @@
 #include "console.h"
 #include "string.h"
 #include "ipc.h"
+#include "shell.h"
 
 /* Global script context */
 static script_context_t script_ctx;
@@ -235,19 +236,29 @@ int script_redirect_input(const char* filename) {
 /* Pipe support */
 int script_create_pipe(const char* cmd1, const char* cmd2) {
     if (!cmd1 || !cmd2) return -1;
-    
+
     console_write("SCRIPT: Creating pipe: ");
     console_write(cmd1);
     console_write(" | ");
     console_write(cmd2);
     console_write("\n");
-    
-    /* Use IPC pipe mechanism */
-    pipe_t* pipe = pipe_create(0, 0);
-    if (!pipe) return -1;
-    
-    /* TODO: Execute cmd1, redirect output to pipe, execute cmd2 with input from pipe */
-    
-    pipe_close(pipe);
+
+    /* Hand off to the real shell pipeline runner (kernel/shell.c): it
+     * captures cmd1's stdout via console_set_capture() and feeds it to
+     * cmd2 as stdin, exactly like `cmd1 | cmd2` typed at the interactive
+     * prompt - not just a printed announcement. */
+    char line[512];
+    size_t len1 = string_length(cmd1);
+    size_t len2 = string_length(cmd2);
+    if (len1 + 3 + len2 >= sizeof(line)) {
+        console_write("SCRIPT: pipe command too long\n");
+        return -1;
+    }
+
+    string_copy(line, cmd1);
+    string_concat(line, " | ");
+    string_concat(line, cmd2);
+
+    shell_execute(line);
     return 0;
 }

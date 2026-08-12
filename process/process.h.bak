@@ -1,0 +1,167 @@
+/*
+ * OrgitoOS - Process Management (Phase 1)
+ *
+ * Process control blocks, kernel threads, user-mode processes,
+ * fork/exit/wait/kill/sleep, and process table management.
+ *
+ * Every process owns a kernel stack. Kernel threads execute entirely on
+ * it; user processes additionally own a user stack and enter ring 3 via
+ * enter_user_mode(). Context state between switches is a small
+ * callee-saved frame on the kernel stack (see arch/x86/context.S).
+ */
+
+#ifndef ORGITOOS_PROCESS_PROCESS_H
+#define ORGITOOS_PROCESS_PROCESS_H
+
+#include <stdint.h>
+#include <stddef.h>
+#include "../memory/vmm.h"
+
+/* Limits */
+#define PROCESS_MAX          64
+#define PROCESS_NAME_LEN     32
+#define PROCESS_KSTACK_SIZE  16384   /* 16 KiB kernel stack   */
+#define PROCESS_USTACK_SIZE  16384   /* 16 KiB user stack     */
+#define PROCESS_USTACK_PAGES (PROCESS_USTACK_SIZE / PAGE_SIZE)
+
+/* Fixed virtual address every user process maps its private stack at. Chosen
+ * safely above vmm_init()'s 64 MiB identity-map cap so it can never collide
+ * with the shared kernel/heap mappings cloned into a process's directory
+ * (see vmm_clone_kernel_mappings). Every user process uses this same
+ * virtual address - each backed by its own, non-shared physical pages in
+ * its own page directory - so fork() can copy stack bytes without having to
+ * relocate any pointers inside them (parent and child see identical
+ * virtual addresses for their respective stacks). */
+#define PROCESS_USTACK_VIRT_BASE 0x08000000u
+
+/* Priorities (lower number = higher priority) */
+#define PRIORITY_HIGH    0
+#define PRIORITY_NORMAL  1
+#define PRIORITY_LOW     2
+#define PRIORITY_LEVELS  3
+
+/* Process states */
+typedef enum {
+    PROCESS_STATE_UNUSED = 0,   /* Slot free                            */
+    PROCESS_STATE_READY,        /* Runnable, waiting in a ready queue   */
+    PROCESS_STATE_RUNNING,      /* Currently executing                  */
+    PROCESS_STATE_BLOCKED,      /* Waiting on an event (e.g. wait())    */
+    PROCESS_STATE_SLEEPING,     /* Timed sleep until sleep_until ticks  */
+    PROCESS_STATE_ZOMBIE,       /* Exited; awaiting reaping             */
+    PROCESS_STATE_TERMINATED = PROCESS_STATE_ZOMBIE  /* Legacy alias    */
+} process_state_t;
+
+/* Process entry point type (kernel threads) */
+typedef void (*process_entry_t)(void *arg);
+
+/* One physical page backing an exec()'d ELF image's PT_LOAD segments
+ * (kernel/exec.c), recording where and how it was mapped so sys_fork()
+ * (kernel/syscall.c) can deep-copy it into a child's own page_dir. See
+ * process_t.exec_pages below. */
+typedef struct {
+    uint32_t vaddr;   /* Virtual address this page is mapped at            */
+    uint32_t phys;    /* Physical frame backing it                         */
+    uint32_t flags;   /* PTE flags it was mapped with (PTE_USER, PTE_WRITABLE, ...) */
+} exec_page_t;
+
+/* Process control block */
+typedef struct process {
+    uint32_t         pid;
+    uint32_t         ppid;
+    char             name[PROCESS_NAME_LEN];
+    process_state_t  state;
+
+    /* Scheduling */
+    uint8_t          priority;       /* 0 (high) .. 2 (low)             */
+    uint8_t          base_priority;  /* Priority before aging boosts    */
+    uint32_t         quantum_left;   /* Ticks left in current quantum   */
+    uint32_t         wait_ticks;     /* Ticks spent waiting (aging)     */
+    uint64_t         cpu_ticks;      /* Total ticks of CPU time         */
+    struct process  *next;           /* Ready-queue link                */
+
+    /* Kernel stack + saved context */
+    uint8_t         *kstack;         /* Base of kernel stack            */
+    uint32_t         kstack_top;     /* Top (initial ESP0)              */
+    uint32_t         esp;            /* Saved kernel ESP when not running */
+
+    /* Address space. Kernel threads (and idle) share vmm_kernel_directory()
+     * directly. User processes get their own directory, cloned from the
+     * kernel's for code/heap access, plus a private mapping for ustack. */
+    struct page_directory *page_dir;
+
+    /* User mode */
+    int              is_user;
+    uint32_t         ustack_top;
+    uint32_t         user_entry;     /* Ring 3 entry point               */
+    uint32_t         ustack_phys[PROCESS_USTACK_PAGES]; /* Private physical
+                                       * pages backing this user process's
+                                       * stack at PROCESS_USTACK_VIRT_BASE,
+                                       * mapped only in this process's own
+                                       * page_dir. Zero entries are unused
+                                       * (kernel threads never populate this). */
+
+    /* Sleep / exit bookkeeping */
+    uint64_t         sleep_until;    /* Wake tick when SLEEPING          */
+    int              exit_code;
+    int              parent_waiting; /* Parent blocked in process_wait() */
+
+    /* exec()'d ELF image (kernel/exec.c): physical pages backing the
+     * PT_LOAD segments mapped into this process's own page_dir, privately
+     * owned by it (never shared with the kernel directory or any other
+     * process). Heap-allocated array, NULL for processes that never
+     * exec()'d (e.g. the kernel-linked demo entries in user_programs.c).
+     * Freed alongside the user stack in process_exit()/process_kill();
+     * the page *table* structures that pointed to them are freed later,
+     * when vmm_destroy_directory() tears down the whole directory.
+     *
+     * Each entry also records the virtual address and mapping flags the
+     * page was mapped with (not just its physical frame) so that
+     * sys_fork() (kernel/syscall.c) can deep-copy an exec()'d image into
+     * a child's own page_dir at the identical virtual address - mirroring
+     * how it already deep-copies the fixed user-stack window. Without
+     * vaddr/flags there would be no way to know *where* each physical
+     * frame was mapped, only that it was. */
+    exec_page_t     *exec_pages;
+    uint32_t         exec_page_count;
+} process_t;
+
+/* ---- Lifecycle ---------------------------------------------------- */
+
+/* Initialize process management; adopts the boot context as PID 0 (idle). */
+void process_init(void);
+
+/* Create a kernel thread. Returns PCB or NULL. */
+process_t *process_create(const char *name, process_entry_t entry,
+                          void *arg, uint8_t priority);
+
+/* Create a ring 3 process running `entry` on its own user stack. */
+process_t *process_create_user(const char *name, void (*entry)(void),
+                               uint8_t priority);
+
+/* Terminate the calling process. Never returns. */
+void process_exit(int code) __attribute__((noreturn));
+
+/* Terminate an arbitrary process by pid. Returns 0 on success. */
+int process_kill(uint32_t pid);
+
+/* Block until a child exits; reaps it. Returns child pid or -1.
+ * If status != NULL, receives the child's exit code. */
+int process_wait(int *status);
+
+/* Sleep the calling process for at least `ms` milliseconds. */
+void process_sleep(uint32_t ms);
+
+/* ---- Queries ------------------------------------------------------ */
+
+process_t *process_current(void);
+uint32_t   process_getpid(void);
+uint32_t   process_getppid(void);
+process_t *process_by_pid(uint32_t pid);
+process_t *process_table_entry(int index);      /* index 0..PROCESS_MAX-1 */
+const char *process_state_name(process_state_t s);
+int         process_count(void);
+
+/* Internal: mark table entry free and release its stacks (reaper). */
+void process_release(process_t *p);
+
+#endif /* ORGITOOS_PROCESS_PROCESS_H */

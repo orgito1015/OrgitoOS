@@ -54,6 +54,16 @@ typedef enum {
 /* Process entry point type (kernel threads) */
 typedef void (*process_entry_t)(void *arg);
 
+/* One physical page backing an exec()'d ELF image's PT_LOAD segments
+ * (kernel/exec.c), recording where and how it was mapped so sys_fork()
+ * (kernel/syscall.c) can deep-copy it into a child's own page_dir. See
+ * process_t.exec_pages below. */
+typedef struct {
+    uint32_t vaddr;   /* Virtual address this page is mapped at            */
+    uint32_t phys;    /* Physical frame backing it                         */
+    uint32_t flags;   /* PTE flags it was mapped with (PTE_USER, PTE_WRITABLE, ...) */
+} exec_page_t;
+
 /* Process control block */
 typedef struct process {
     uint32_t         pid;
@@ -69,10 +79,25 @@ typedef struct process {
     uint64_t         cpu_ticks;      /* Total ticks of CPU time         */
     struct process  *next;           /* Ready-queue link                */
 
+    /* True for exactly one process per online CPU: that CPU's dedicated
+     * idle process (process/percpu.h cpu_local_t.idle). Never enqueued -
+     * scheduler_enqueue() checks this instead of the old single-idle
+     * "pid == 0" special case, since every CPU now has its own idle
+     * process, not just the BSP. */
+    int              is_idle;
+
     /* Kernel stack + saved context */
     uint8_t         *kstack;         /* Base of kernel stack            */
     uint32_t         kstack_top;     /* Top (initial ESP0)              */
     uint32_t         esp;            /* Saved kernel ESP when not running */
+
+    /* Entry point/argument for a brand-new kernel thread, consumed by
+     * kthread_launch() (process/process.c) the first time this process
+     * is ever scheduled - see process_create()'s doc comment for why
+     * these live in the PCB rather than directly on the hand-built
+     * initial kernel stack frame. */
+    process_entry_t  pending_entry;
+    void             *pending_arg;
 
     /* Address space. Kernel threads (and idle) share vmm_kernel_directory()
      * directly. User processes get their own directory, cloned from the
@@ -94,12 +119,40 @@ typedef struct process {
     uint64_t         sleep_until;    /* Wake tick when SLEEPING          */
     int              exit_code;
     int              parent_waiting; /* Parent blocked in process_wait() */
+
+    /* exec()'d ELF image (kernel/exec.c): physical pages backing the
+     * PT_LOAD segments mapped into this process's own page_dir, privately
+     * owned by it (never shared with the kernel directory or any other
+     * process). Heap-allocated array, NULL for processes that never
+     * exec()'d (e.g. the kernel-linked demo entries in user_programs.c).
+     * Freed alongside the user stack in process_exit()/process_kill();
+     * the page *table* structures that pointed to them are freed later,
+     * when vmm_destroy_directory() tears down the whole directory.
+     *
+     * Each entry also records the virtual address and mapping flags the
+     * page was mapped with (not just its physical frame) so that
+     * sys_fork() (kernel/syscall.c) can deep-copy an exec()'d image into
+     * a child's own page_dir at the identical virtual address - mirroring
+     * how it already deep-copies the fixed user-stack window. Without
+     * vaddr/flags there would be no way to know *where* each physical
+     * frame was mapped, only that it was. */
+    exec_page_t     *exec_pages;
+    uint32_t         exec_page_count;
 } process_t;
 
 /* ---- Lifecycle ---------------------------------------------------- */
 
-/* Initialize process management; adopts the boot context as PID 0 (idle). */
+/* Initialize process management; adopts the boot context as PID 0 (idle
+ * for CPU 0 / the BSP). Call once, from the BSP, before smp_init() brings
+ * up any Application Processors (see kernel/kernel.c's boot order). */
 void process_init(void);
+
+/* Create a dedicated idle process for Application Processor `cpu_id` and
+ * register it as that CPU's cpu_local_t.idle. Called once per AP, from
+ * kernel/smp.c's ap_entry() right after that AP marks itself online -
+ * process_init() must already have run (on the BSP, earlier in boot) so
+ * the process table exists to allocate from. */
+void process_init_ap(uint32_t cpu_id);
 
 /* Create a kernel thread. Returns PCB or NULL. */
 process_t *process_create(const char *name, process_entry_t entry,

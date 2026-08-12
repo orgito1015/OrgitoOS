@@ -9,12 +9,21 @@
 
 /*
  * Kernel image boundaries from the linker script (linker.ld). Addresses,
- * not variables — only their &-address is meaningful. [kernel_start,
- * rodata_start) is the kernel's .text: the only slice of the identity map
- * that stays user-executable (see vmm_init()).
+ * not variables — only their &-address is meaningful.
+ *
+ * kernel_start/rodata_start are the kernel's *virtual* (higher-half,
+ * KERNEL_VIRTUAL_BASE = 0xC0000000) addresses — [kernel_start,
+ * rodata_start) is the kernel's .text, the only slice of the *higher-half
+ * alias* that stays user-executable (see vmm_init()). kernel_start_phys/
+ * rodata_start_phys/kernel_end_phys are the same boundaries' *physical*
+ * addresses (linker-computed as `symbol - KERNEL_VIRTUAL_BASE`), used as
+ * the physical backing for that same higher-half alias mapping below.
  */
 extern uint8_t kernel_start[];
 extern uint8_t rodata_start[];
+extern uint8_t kernel_start_phys[];
+extern uint8_t rodata_start_phys[];
+extern uint8_t kernel_end_phys[];
 
 /* Current page directory */
 static struct page_directory *current_directory = 0;
@@ -40,9 +49,17 @@ static inline void tlb_flush_all(void) {
 }
 
 /*
- * Get or create a page table for a virtual address
- * NOTE: This function assumes physical memory is identity-mapped (virt == phys)
- *       which is true during Phase 0. For higher-half kernel, this will need updating.
+ * Get or create a page table for a virtual address.
+ *
+ * NOTE: this treats a freshly pmm_alloc_page()'d physical address as a
+ * directly dereferenceable pointer (`(struct page_table *)phys`), which
+ * requires physical memory to be identity-mapped (virt == phys) at that
+ * address. That's still true after the higher-half move (linker.ld,
+ * arch/x86/boot.S): vmm_init() keeps its full low-RAM identity map fully
+ * intact - the *only* thing higher-half added is one additional mapping
+ * for the kernel image's own higher-half addresses (see vmm_init()'s "1.
+ * dual-mapped, not pure higher-half" design decision) - so this
+ * assumption was deliberately preserved, not broken, by that work.
  */
 static struct page_table *get_page_table(struct page_directory *dir, void *virt, bool create) {
     uint32_t pd_index = PD_INDEX(virt);
@@ -166,25 +183,56 @@ void vmm_init(void) {
      * bitmap, the process table (PCBs), and every process's kernel stack
      * (kmalloc'd from this same region) — none of it is reachable from
      * ring 3 anymore.
-     *
-     * The one carve-out is [kernel_start, rodata_start): the kernel's own
-     * .text. OrgitoOS has no exec() yet (see docs/roadmap/roadmap.md), so
-     * ring 3 "processes" are kernel-linked C functions
-     * (kernel/user_programs.c) entered via enter_user_mode() — they must
-     * be able to fetch their own code. They already talk to the kernel
-     * exclusively through int 0x80 syscalls, never by touching
-     * .rodata/.data/.bss directly, so nothing past rodata_start needs to
-     * stay user-accessible.
      */
     vmm_identity_map_region(kernel_directory, 0, ram_end,
                            PTE_PRESENT | PTE_WRITABLE);
-    vmm_identity_map_region(kernel_directory, kernel_start,
-                           (uint32_t)rodata_start - (uint32_t)kernel_start,
-                           PTE_PRESENT | PTE_WRITABLE | PTE_USER);
+
+    /*
+     * Higher-half alias for the kernel image itself (linker.ld,
+     * arch/x86/boot.S): the kernel is linked to run from kernel_start
+     * (KERNEL_VIRTUAL_BASE + 1 MiB), not its physical load address, so
+     * that virtual range needs its own mapping here — the general RAM
+     * identity map above only covers *physical* addresses, and
+     * kernel_start is not one.
+     *
+     * Deliberately a *dual-mapped* higher-half kernel, not a *pure* one:
+     * every physical page the PMM ever hands out (heap, page tables,
+     * user process pages, ...) is still treated as a directly
+     * dereferenceable pointer throughout this codebase (get_page_table()
+     * above is one example among many — memory/heap.c, kernel/exec.c,
+     * fs/diskfs.c, process/process.c all do the same). Making this a
+     * *pure* higher-half kernel (no low identity map at all) would mean
+     * converting every one of those call sites to route through
+     * PHYS_TO_VIRT() first — a sweeping change across memory management,
+     * process management, exec, and the filesystem that can't be
+     * verified without booting this kernel, so it's explicitly out of
+     * scope here. Keeping the low identity map fully intact (above) and
+     * only *adding* this one extra mapping satisfies the literal roadmap
+     * ask (the kernel actually runs from a higher-half virtual address,
+     * KERNEL_VIRTUAL_BASE stops being unused) while touching the minimum
+     * possible surface elsewhere.
+     *
+     * Split into the same two pieces the old identity-map carve-out was:
+     * [kernel_start, rodata_start) (.text) stays PTE_USER, since ring 3
+     * "processes" are kernel-linked C functions (kernel/user_programs.c)
+     * entered via enter_user_mode() that must be able to fetch their own
+     * code — and after the higher-half move, their *linked* address (what
+     * enter_user_mode() actually receives and IRETs to) is the higher-
+     * half one, not the physical one, so the user-executable carve-out
+     * has to live at the higher-half address now. Everything from
+     * rodata_start onward (.rodata/.data/.bss) stays supervisor-only,
+     * exactly as before.
+     */
+    vmm_map_region(kernel_directory, kernel_start, (uint32_t)kernel_start_phys,
+                  (uint32_t)rodata_start_phys - (uint32_t)kernel_start_phys,
+                  PTE_PRESENT | PTE_WRITABLE | PTE_USER);
+    vmm_map_region(kernel_directory, rodata_start, (uint32_t)rodata_start_phys,
+                  (uint32_t)kernel_end_phys - (uint32_t)rodata_start_phys,
+                  PTE_PRESENT | PTE_WRITABLE);
 
     /* Set as current directory */
     current_directory = kernel_directory;
-    
+
     /* Load page directory into CR3 */
     vmm_switch_directory(kernel_directory);
 }

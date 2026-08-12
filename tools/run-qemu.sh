@@ -68,6 +68,15 @@ if [ ! -f "$ISO_FILE" ] || [ "$KERNEL_BIN" -nt "$ISO_FILE" ]; then
     rm -f "$ISO_LOG"
 fi
 
+# Persistent data disk for drivers/ata.c + fs/diskfs.c (mounted at /mnt) -
+# created once as a 16 MiB flat image and never overwritten afterwards, so
+# files written to /mnt survive across `make run` invocations.
+DISK_IMG="disk.img"
+if [ ! -f "$DISK_IMG" ]; then
+    echo -e "${YELLOW}Creating persistent disk image: $DISK_IMG (16 MiB)...${NC}"
+    dd if=/dev/zero of="$DISK_IMG" bs=1M count=16 status=none
+fi
+
 # Display startup info
 echo -e "${GREEN}Starting OrgitoOS in QEMU...${NC}"
 echo "Kernel: $KERNEL_BIN"
@@ -80,6 +89,11 @@ echo ""
 # Using ISO boot is more reliable than direct kernel boot
 # and works with all QEMU versions (including 7.0+)
 # -boot d specifies boot from CD-ROM first, avoiding disk read attempts
-qemu-system-i386 -cdrom "$ISO_FILE" -boot d
+# -device rtl8139: pin the emulated NIC explicitly (drivers/rtl8139.c only
+# knows this chip); -netdev user gives it QEMU's SLIRP network, matching
+# net_init()'s default guest IP 10.0.2.15/24, gateway 10.0.2.2
+qemu-system-i386 -cdrom "$ISO_FILE" -boot d \
+    -netdev user,id=n0 -device rtl8139,netdev=n0 \
+    -hda "$DISK_IMG"
 
 echo -e "${YELLOW}QEMU exited${NC}"

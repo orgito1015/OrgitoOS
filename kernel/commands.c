@@ -76,7 +76,11 @@ void commands_register_all(void) {
     shell_register_command("touch", "Create an empty file", cmd_touch);
     shell_register_command("write", "Write text to a file [write <file> <text...>]", cmd_write);
     shell_register_command("rm", "Remove a file or directory", cmd_rm);
+    shell_register_command("grep", "Filter lines matching a pattern [grep <pattern> [file]] (pipeable)", cmd_grep);
+    shell_register_command("wc", "Count lines/words/bytes [wc [file]] (pipeable)", cmd_wc);
     shell_register_command("meminfo", "Show physical and heap memory usage", cmd_meminfo);
+    shell_register_command("ping", "Ping an IPv4 host over the real NIC [ping <ip>]", cmd_ping);
+    shell_register_command("tcpconnect", "Connect over real TCP [tcpconnect <ip> <port> [message]]", cmd_tcpconnect);
     shell_register_command("reboot", "Reboot the system", cmd_reboot);
     
     /* New feature test commands */
@@ -96,6 +100,7 @@ void commands_register_all(void) {
     shell_register_command("uecho", "Run ring 3 read() demo (type a line back)", cmd_uecho);
     shell_register_command("psleep", "Sleep the shell [psleep <ms>]", cmd_psleep);
     shell_register_command("sched", "Show scheduler statistics", cmd_sched);
+    shell_register_command("exec", "Load and run a real ELF32 binary [exec <path>]", cmd_exec);
 }
 
 /*
@@ -843,13 +848,9 @@ void cmd_mkdir(int argc, char** argv) {
             continue;
         }
 
-        vfs_node_t* dir = vfs_create_node(leaf, NODE_DIRECTORY);
+        vfs_node_t* dir = vfs_mkchild(parent, leaf, NODE_DIRECTORY);
         if (!dir) {
-            console_write("mkdir: cannot create directory (out of nodes)\n");
-            continue;
-        }
-        if (vfs_add_child(parent, dir) != 0) {
-            console_write("mkdir: cannot create directory (parent full)\n");
+            console_write("mkdir: cannot create directory (out of space)\n");
         }
     }
 }
@@ -882,13 +883,9 @@ void cmd_touch(int argc, char** argv) {
             continue;
         }
 
-        vfs_node_t* file = vfs_create_node(leaf, NODE_FILE);
+        vfs_node_t* file = vfs_mkchild(parent, leaf, NODE_FILE);
         if (!file) {
-            console_write("touch: cannot create file (out of nodes)\n");
-            continue;
-        }
-        if (vfs_add_child(parent, file) != 0) {
-            console_write("touch: cannot create file (directory full)\n");
+            console_write("touch: cannot create file (out of space)\n");
         }
     }
 }
@@ -925,8 +922,8 @@ void cmd_write(int argc, char** argv) {
         return;
     }
     if (!file) {
-        file = vfs_create_node(leaf, NODE_FILE);
-        if (!file || vfs_add_child(parent, file) != 0) {
+        file = vfs_mkchild(parent, leaf, NODE_FILE);
+        if (!file) {
             console_write("write: cannot create file\n");
             return;
         }
@@ -989,7 +986,7 @@ void cmd_rm(int argc, char** argv) {
             console_write(": No such file or directory\n");
             continue;
         }
-        if (vfs_remove_child(parent, leaf) != 0) {
+        if (vfs_unlink(parent, leaf) != 0) {
             console_write("rm: ");
             console_write(argv[a]);
             console_write(": failed to remove\n");
@@ -1174,7 +1171,10 @@ void cmd_test_gui(int argc, char** argv) {
         
         console_write("Rendering window...\n");
         gui_render_window(window);
-        
+
+        console_write("Flipping to the real display (if a framebuffer is active)...\n");
+        gui_flip_to_screen();
+
         console_write("Hiding window...\n");
         gui_hide_window(window);
         
@@ -1187,6 +1187,186 @@ void cmd_test_gui(int argc, char** argv) {
     }
     
     console_write("\nGUI test complete!\n\n");
+}
+
+/*
+ * Parse a dotted-decimal IPv4 address string ("a.b.c.d") into an
+ * ip_addr_t. Returns 0 on success, -1 on any malformed input.
+ */
+static int parse_ipv4(const char* s, ip_addr_t* out) {
+    int part = 0;
+    int val = 0;
+    int have_digit = 0;
+
+    for (const char* p = s; ; p++) {
+        if (*p >= '0' && *p <= '9') {
+            val = val * 10 + (*p - '0');
+            have_digit = 1;
+            if (val > 255) return -1;
+        } else if (*p == '.' || *p == '\0') {
+            if (!have_digit || part >= 4) return -1;
+            out->addr[part++] = (uint8_t)val;
+            val = 0;
+            have_digit = 0;
+            if (*p == '\0') break;
+        } else {
+            return -1;
+        }
+    }
+
+    return (part == 4) ? 0 : -1;
+}
+
+/*
+ * PING command - send a real ICMP echo request over the NIC and wait
+ * for the reply (kernel/network.c net_ping).
+ * Usage: ping <ipv4-address>
+ */
+void cmd_ping(int argc, char** argv) {
+    if (argc < 2) {
+        console_write("Usage: ping <ipv4-address>\n");
+        console_write("  e.g. ping 10.0.2.2   (QEMU user-mode networking's default gateway)\n");
+        return;
+    }
+
+    ip_addr_t target;
+    if (parse_ipv4(argv[1], &target) != 0) {
+        console_write("ping: invalid IPv4 address: ");
+        console_write(argv[1]);
+        console_write("\n");
+        return;
+    }
+
+    net_device_t* dev = net_get_device();
+    if (!dev || !dev->is_up) {
+        console_write("ping: network is down (no RTL8139 NIC found at boot)\n");
+        return;
+    }
+
+    console_write("PING ");
+    console_write(argv[1]);
+    console_write(": ");
+
+    uint32_t rtt_ms = 0;
+    if (net_ping(&target, &rtt_ms) == 0) {
+        console_write("reply in ");
+        char buf[12];
+        itoa((int)rtt_ms, buf, 10);
+        console_write(buf);
+        console_write(" ms\n");
+    } else {
+        console_write("timeout (no reply within 1s)\n");
+    }
+}
+
+/*
+ * Parse an unsigned decimal integer. Returns 0 on success (and fills
+ * *out), -1 on any non-digit character or an empty string.
+ */
+static int parse_uint_arg(const char* s, uint32_t* out) {
+    if (!s || !*s) return -1;
+    uint32_t v = 0;
+    for (const char* p = s; *p; p++) {
+        if (*p < '0' || *p > '9') return -1;
+        v = v * 10 + (uint32_t)(*p - '0');
+    }
+    *out = v;
+    return 0;
+}
+
+/*
+ * TCPCONNECT command - demonstrate the minimal client TCP state machine
+ * (kernel/network.c): a real 3-way handshake, optional data send, a brief
+ * poll for a reply, then a FIN close.
+ * Usage: tcpconnect <ipv4-address> <port> [message]
+ */
+void cmd_tcpconnect(int argc, char** argv) {
+    if (argc < 3) {
+        console_write("Usage: tcpconnect <ipv4-address> <port> [message]\n");
+        console_write("  e.g. tcpconnect 10.0.2.2 7    (QEMU SLIRP has no echo service by default)\n");
+        return;
+    }
+
+    ip_addr_t target;
+    if (parse_ipv4(argv[1], &target) != 0) {
+        console_write("tcpconnect: invalid IPv4 address: ");
+        console_write(argv[1]);
+        console_write("\n");
+        return;
+    }
+
+    uint32_t port;
+    if (parse_uint_arg(argv[2], &port) != 0 || port == 0 || port > 65535) {
+        console_write("tcpconnect: invalid port: ");
+        console_write(argv[2]);
+        console_write("\n");
+        return;
+    }
+
+    net_device_t* dev = net_get_device();
+    if (!dev || !dev->is_up) {
+        console_write("tcpconnect: network is down (no RTL8139 NIC found at boot)\n");
+        return;
+    }
+
+    socket_t* sock = net_socket_create(PROTO_TCP);
+    if (!sock) {
+        console_write("tcpconnect: could not create socket\n");
+        return;
+    }
+
+    console_write("Connecting to ");
+    console_write(argv[1]);
+    console_write(":");
+    console_write(argv[2]);
+    console_write("...\n");
+
+    if (net_socket_connect(sock, &target, (uint16_t)port) != 0) {
+        console_write("tcpconnect: connection failed (no SYN-ACK within 1s, or RST received)\n");
+        net_socket_close(sock);
+        return;
+    }
+    console_write("Connected.\n");
+
+    if (argc >= 4) {
+        int sent = net_socket_send(sock, argv[3], string_length(argv[3]));
+        if (sent < 0) {
+            console_write("tcpconnect: send failed\n");
+        } else {
+            console_write("Sent ");
+            char buf[12];
+            itoa(sent, buf, 10);
+            console_write(buf);
+            console_write(" byte(s)\n");
+        }
+
+        /* Brief best-effort poll for a reply - this stack has no blocking
+         * recv(), so poll net_socket_recv()'s non-blocking "0 = nothing
+         * queued yet" return for up to ~1s. */
+        char reply[SOCK_RX_MAX_LEN + 1];
+        int got = 0;
+        uint64_t deadline = timer_get_ticks() + 100;
+        while (timer_get_ticks() < deadline) {
+            got = net_socket_recv(sock, reply, sizeof(reply) - 1);
+            if (got > 0) break;
+            __asm__ __volatile__("pause");
+        }
+        if (got > 0) {
+            reply[got] = '\0';
+            console_write("Reply (");
+            char buf[12];
+            itoa(got, buf, 10);
+            console_write(buf);
+            console_write(" byte(s)): ");
+            console_write(reply);
+            console_write("\n");
+        } else {
+            console_write("No reply within 1s.\n");
+        }
+    }
+
+    net_socket_close(sock);
+    console_write("Closed.\n");
 }
 
 /*
@@ -1286,6 +1466,164 @@ void cmd_test_script(int argc, char** argv) {
         "echo Condition is true\n";
     
     script_execute(test_script);
-    
+
     console_write("\nScripting test complete!\n\n");
+}
+
+/*
+ * GREP command - print lines containing a pattern.
+ * Usage: grep <pattern> [file]
+ *
+ * Pipe-aware: when run as a non-first stage of a `cmd1 | grep pattern`
+ * pipeline, reads the previous stage's captured output via
+ * shell_stdin_read_line() instead of requiring a file argument.
+ */
+void cmd_grep(int argc, char** argv) {
+    if (argc < 2) {
+        console_write("Usage: grep <pattern> [file]\n");
+        console_write("  Reads stdin when used in a pipeline: cmd | grep <pattern>\n");
+        return;
+    }
+
+    const char* pattern = argv[1];
+    char line[256];
+
+    if (shell_stdin_available()) {
+        while (shell_stdin_read_line(line, sizeof(line))) {
+            if (strstr(line, pattern) != 0) {
+                console_write(line);
+                console_write("\n");
+            }
+        }
+        return;
+    }
+
+    if (argc < 3) {
+        console_write("grep: no input - provide a file or use a pipeline\n");
+        return;
+    }
+
+    vfs_node_t* file;
+    if (argv[2][0] == '/') {
+        file = vfs_resolve_path(argv[2]);
+    } else {
+        char abs_path[VFS_MAX_PATH_LENGTH];
+        build_absolute_path(argv[2], abs_path, VFS_MAX_PATH_LENGTH);
+        file = vfs_resolve_path(abs_path);
+    }
+
+    if (!file || file->type != NODE_FILE) {
+        console_write("grep: ");
+        console_write(argv[2]);
+        console_write(": No such file or directory\n");
+        return;
+    }
+
+    static uint8_t grep_buffer[VFS_MAX_FILE_SIZE];
+    ssize_t bytes_read = vfs_read(file, 0, file->length, grep_buffer);
+    if (bytes_read < 0) {
+        console_write("grep: error reading file\n");
+        return;
+    }
+
+    size_t pos = 0;
+    while ((ssize_t)pos < bytes_read) {
+        size_t start = pos;
+        while ((ssize_t)pos < bytes_read && grep_buffer[pos] != '\n') {
+            pos++;
+        }
+        size_t len = pos - start;
+        if (len >= sizeof(line)) {
+            len = sizeof(line) - 1;
+        }
+        memcpy(line, &grep_buffer[start], len);
+        line[len] = '\0';
+
+        if (strstr(line, pattern) != 0) {
+            console_write(line);
+            console_write("\n");
+        }
+
+        if ((ssize_t)pos < bytes_read) {
+            pos++; /* skip the '\n' */
+        }
+    }
+}
+
+/*
+ * WC command - count lines, words, and bytes.
+ * Usage: wc [file]
+ *
+ * Pipe-aware: reads the previous stage's output in a `cmd | wc` pipeline;
+ * otherwise reads a file argument.
+ */
+void cmd_wc(int argc, char** argv) {
+    uint32_t lines = 0, words = 0, bytes = 0;
+    int in_word = 0;
+
+    if (shell_stdin_available()) {
+        char line[256];
+        while (shell_stdin_read_line(line, sizeof(line))) {
+            lines++;
+            bytes += (uint32_t)string_length(line) + 1; /* +1 for the '\n' delimiter */
+            in_word = 0;
+            for (size_t i = 0; line[i] != '\0'; i++) {
+                if (is_whitespace(line[i])) {
+                    in_word = 0;
+                } else if (!in_word) {
+                    in_word = 1;
+                    words++;
+                }
+            }
+        }
+    } else {
+        if (argc < 2) {
+            console_write("Usage: wc [file]\n");
+            console_write("  Reads stdin when used in a pipeline: cmd | wc\n");
+            return;
+        }
+
+        vfs_node_t* file;
+        if (argv[1][0] == '/') {
+            file = vfs_resolve_path(argv[1]);
+        } else {
+            char abs_path[VFS_MAX_PATH_LENGTH];
+            build_absolute_path(argv[1], abs_path, VFS_MAX_PATH_LENGTH);
+            file = vfs_resolve_path(abs_path);
+        }
+
+        if (!file || file->type != NODE_FILE) {
+            console_write("wc: ");
+            console_write(argv[1]);
+            console_write(": No such file or directory\n");
+            return;
+        }
+
+        static uint8_t wc_buffer[VFS_MAX_FILE_SIZE];
+        ssize_t bytes_read = vfs_read(file, 0, file->length, wc_buffer);
+        if (bytes_read < 0) {
+            console_write("wc: error reading file\n");
+            return;
+        }
+
+        bytes = (uint32_t)bytes_read;
+        for (ssize_t i = 0; i < bytes_read; i++) {
+            if (wc_buffer[i] == '\n') {
+                lines++;
+            }
+            if (is_whitespace((char)wc_buffer[i])) {
+                in_word = 0;
+            } else if (!in_word) {
+                in_word = 1;
+                words++;
+            }
+        }
+    }
+
+    print_number(lines);
+    console_write(" ");
+    print_number(words);
+    console_write(" ");
+    print_number(bytes);
+    console_write("\n");
 }

@@ -45,6 +45,17 @@ static inline uint32_t inl(uint16_t port) {
     return ret;
 }
 
+/* Read `count` words from `port` into `addr` back-to-back (e.g. draining
+ * an ATA PIO data register 256 words at a time). */
+static inline void insw(uint16_t port, void *addr, uint32_t count) {
+    __asm__ __volatile__("rep insw" : "+D"(addr), "+c"(count) : "d"(port) : "memory");
+}
+
+/* Write `count` words from `addr` to `port` back-to-back. */
+static inline void outsw(uint16_t port, const void *addr, uint32_t count) {
+    __asm__ __volatile__("rep outsw" : "+S"(addr), "+c"(count) : "d"(port) : "memory");
+}
+
 /* I/O wait - used for short delays between I/O operations */
 static inline void io_wait(void) {
     /* Port 0x80 is used for 'checkpoints' during POST */
