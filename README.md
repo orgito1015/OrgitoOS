@@ -212,7 +212,7 @@ Throughput: 6103.52 MB/s
 
 See [kernel/cpu/README.md](kernel/cpu/README.md) for detailed documentation on the CPU simulator.
 
-## 🛠️ Build & Run
+## Build & Run
 
 ### Prerequisites
 To build and run OrgitoOS, you'll need:
