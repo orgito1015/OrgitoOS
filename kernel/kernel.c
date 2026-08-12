@@ -137,6 +137,18 @@ void kmain(struct multiboot_info *mboot) {
     fb_remap_after_paging();
 
     /*
+     * Drawing to the framebuffer only became safe on the line above -
+     * console_init() (and every console_write() since, for the "[N/16]"
+     * messages up through this point) ran before that, so any framebuffer
+     * output was silently dropped (see drivers/framebuffer.c's fb_active
+     * gate) rather than drawn onto unmapped memory. Do the deferred clear
+     * and reset the text cursor now that it's actually mapped. No-op if
+     * this console isn't framebuffer-backed (plain VGA text never needed
+     * deferring, so nothing printed so far was lost on that path).
+     */
+    console_framebuffer_ready();
+
+    /*
      * Initialize the kernel heap on a PMM-backed region.
      *
      * Reserve a contiguous run of physical pages while paging still maps

@@ -102,7 +102,10 @@ try:
             print(f"   Offset: 0x{offset:X} ({offset} bytes)")
             
             magic_ok = magic == 0x1BADB002
-            flags_ok = flags == 0x00000003
+            # ALIGN(0x1) | MEMINFO(0x2) | VIDMODE(0x4): boot.S requests a
+            # graphics-mode framebuffer for drivers/framebuffer.c, so this
+            # must match FLAGS there, not the text-only 0x3 subset.
+            flags_ok = flags == 0x00000007
             checksum_ok = checksum == (-(magic + flags) & 0xFFFFFFFF)
             within_8kb = offset < 8192
             
@@ -145,7 +148,7 @@ echo -e "${YELLOW}[5/5] Binary Verification (hexdump)${NC}"
 if command -v hexdump &> /dev/null; then
     HEXDATA=$(hexdump -C "$KERNEL_BIN" -s 0x80 -n 12)
     echo "$HEXDATA"
-    if echo "$HEXDATA" | grep -q "02 b0 ad 1b 03 00 00 00"; then
+    if echo "$HEXDATA" | grep -q "02 b0 ad 1b 07 00 00 00"; then
         echo -e "   ${GREEN}✓ Multiboot header bytes verified${NC}"
         HEX_CHECK="PASS"
     else

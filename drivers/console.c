@@ -73,6 +73,13 @@ void console_init(struct multiboot_info *mboot) {
     console_clear();
 }
 
+/* See console.h. */
+void console_framebuffer_ready(void) {
+    if (use_framebuffer) {
+        console_clear();
+    }
+}
+
 /* Clear console */
 void console_clear(void) {
     if (use_framebuffer) {

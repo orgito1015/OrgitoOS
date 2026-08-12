@@ -157,7 +157,7 @@ The kernel relies on GRUB's GDT, which is standard for Multiboot kernels. The se
 
 1. **Build the kernel:**
    ```bash
-   cd /path/to/My-Operating-System-OpenOS
+   cd /path/to/OrgitoOS
    make clean
    make all
    ```

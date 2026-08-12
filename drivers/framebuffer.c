@@ -3,13 +3,21 @@
  *
  * See framebuffer.h for the design overview. Two things worth flagging:
  *
- *   1. fb_ptr is a *physical* address used as a raw pointer. That's only
- *      valid before paging is enabled (true at fb_init() time - it runs
- *      from console_init(), the very first thing kmain() does) or once
- *      fb_remap_after_paging() has identity-mapped that exact physical
- *      range, which kernel/kernel.c calls immediately after vmm_init().
- *      There is no window in between where a console_write() could touch
- *      unmapped memory.
+ *   1. fb_ptr is a *physical* address used as a raw pointer, only safe to
+ *      dereference once fb_remap_after_paging() has identity-mapped that
+ *      exact physical range (kernel/kernel.c calls it right after
+ *      vmm_init()). fb_init() itself runs earlier, from console_init() -
+ *      the very first thing kmain() does, well before vmm_init() - so it
+ *      deliberately only records geometry (fb_detected) and never touches
+ *      fb_ptr. Every function that actually draws is gated on the
+ *      separate fb_active flag, which stays 0 until fb_remap_after_paging()
+ *      finishes, so a console_write() in that window (there are several -
+ *      GDT/IDT/PIC/timer/keyboard setup all log before vmm_init() runs)
+ *      just silently no-ops on screen instead of touching unmapped memory;
+ *      it still reaches serial (drivers/console.c mirrors unconditionally).
+ *      console_framebuffer_ready() (called right after fb_remap_after_paging())
+ *      does the deferred fb_clear() and resets the text cursor once
+ *      drawing is finally safe.
  *
  *   2. The 5x7 font below is a deliberately simple, self-authored bitmap
  *      font (not a copy of real VGA/VESA font ROM data) covering space,
@@ -38,7 +46,8 @@ static uint32_t fb_mapped_size = 0;
 static uint8_t  fb_red_pos = 0, fb_red_size = 0;
 static uint8_t  fb_green_pos = 0, fb_green_size = 0;
 static uint8_t  fb_blue_pos = 0, fb_blue_size = 0;
-static int      fb_active = 0;
+static int      fb_detected = 0; /* geometry known (fb_init() succeeded) */
+static int      fb_active = 0;   /* mapped by fb_remap_after_paging() - safe to draw */
 
 #define FB_GLYPH_W 5
 #define FB_GLYPH_H 7
@@ -50,6 +59,7 @@ static int      fb_active = 0;
 /* ------------------------------------------------------------------ */
 
 int fb_init(struct multiboot_info *mboot) {
+    fb_detected = 0;
     fb_active = 0;
     if (!mboot) return -1;
     if (!(mboot->flags & MULTIBOOT_FLAG_FRAMEBUFFER)) return -1;
@@ -72,24 +82,34 @@ int fb_init(struct multiboot_info *mboot) {
     fb_blue_pos  = mboot->color_info.rgb.framebuffer_blue_field_position;
     fb_blue_size = mboot->color_info.rgb.framebuffer_blue_mask_size;
 
+    /* fb_ptr is recorded but never dereferenced here - only geometry is
+     * read from `mboot`, which is why fb_detected (not fb_active) is what
+     * this function sets. See the file header comment. */
     fb_ptr = (uint8_t *)(uintptr_t)fb_phys_addr;
     fb_mapped_size = fb_pitch * fb_height;
-    fb_active = 1;
+    fb_detected = 1;
     return 0;
 }
 
 void fb_remap_after_paging(void) {
-    if (!fb_active) return;
+    if (!fb_detected) return;
     uint32_t start = fb_phys_addr & ~((uint32_t)PAGE_SIZE - 1u);
     uint32_t end   = (fb_phys_addr + fb_mapped_size + PAGE_SIZE - 1u) & ~((uint32_t)PAGE_SIZE - 1u);
     vmm_identity_map_region(vmm_kernel_directory(), (void *)(uintptr_t)start,
                             end - start, PTE_PRESENT | PTE_WRITABLE);
+    fb_active = 1;
 }
 
 int fb_is_active(void) { return fb_active; }
 
-size_t fb_text_cols(void) { return fb_active ? (size_t)(fb_width / FB_CELL_W) : 0; }
-size_t fb_text_rows(void) { return fb_active ? (size_t)(fb_height / FB_CELL_H) : 0; }
+/* Text-grid sizing only needs the geometry fb_init() already recorded, not
+ * a mapped framebuffer, so it's gated on fb_detected: drivers/console.c
+ * calls these on every character even before fb_remap_after_paging() has
+ * run, and returning 0 here in that window would make its col/row
+ * wrap-around math underflow term_row/term_col instead of just laying out
+ * text normally (which then draws for real once fb_active flips on). */
+size_t fb_text_cols(void) { return fb_detected ? (size_t)(fb_width / FB_CELL_W) : 0; }
+size_t fb_text_rows(void) { return fb_detected ? (size_t)(fb_height / FB_CELL_H) : 0; }
 
 /* ------------------------------------------------------------------ */
 /* Pixel access                                                         */

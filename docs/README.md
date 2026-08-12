@@ -42,8 +42,11 @@ Documentation of hardware driver bugs and fixes.
 Strategic planning documents, evolution strategies, and phase completion records.
 
 **Contents:**
-- `roadmap.md` - Future development plans and feature roadmap
-- `OS_EVOLUTION_STRATEGY.md` - 36-week development roadmap
+- `roadmap.md` - Completed development plans and feature roadmap (all phases done)
+- `FUTURE_FEATURES.md` - Curated, prioritized plan for what's next (start here for new work)
+- `OS_EVOLUTION_STRATEGY.md` - Original, broader wishlist written early in the
+  project; largely superseded by `FUTURE_FEATURES.md` now that most of its
+  Section 1 is implemented
 - `UPGRADE_PHASE0.md` - Complete Phase 0 implementation guide
 
 **Purpose:** Track project direction, milestones, and long-term vision.

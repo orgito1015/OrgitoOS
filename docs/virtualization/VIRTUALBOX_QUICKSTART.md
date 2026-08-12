@@ -29,8 +29,8 @@ The easiest way to run OrgitoOS in VirtualBox is using the automated script:
 
 ```bash
 # Clone the repository (if you haven't already)
-git clone https://github.com/orgito1015/My-Operating-System-OpenOS.git
-cd My-Operating-System-OpenOS
+git clone https://github.com/orgito1015/OrgitoOS.git
+cd OrgitoOS
 
 # Build and run in VirtualBox (one command!)
 make run-vbox
@@ -163,6 +163,6 @@ Now that you have OrgitoOS running:
 
 - 📖 [VirtualBox Troubleshooting Guide](VIRTUALBOX_TROUBLESHOOTING.md)
 - 📖 [Main README](../README.md)
-- 🐛 [File an Issue](https://github.com/orgito1015/My-Operating-System-OpenOS/issues)
+- 🐛 [File an Issue](https://github.com/orgito1015/OrgitoOS/issues)
 
 Enjoy exploring OrgitoOS! 🎉

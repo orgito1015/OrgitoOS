@@ -27,6 +27,19 @@ struct multiboot_info;   /* see include/multiboot.h */
  */
 void console_init(struct multiboot_info *mboot);
 
+/*
+ * Call exactly once, immediately after kernel/kernel.c has called
+ * fb_remap_after_paging(). console_init() may already have produced
+ * output before the framebuffer's physical range was mapped - that
+ * output was safely dropped (drivers/framebuffer.c's fb_active gate)
+ * rather than drawn, so the screen may still show raw/garbage VBE
+ * memory at this point. No-op if this console isn't framebuffer-backed
+ * (VGA text was never unsafe, so it never needed deferring). Performs
+ * the deferred clear and resets the text cursor so output from here on
+ * draws correctly.
+ */
+void console_framebuffer_ready(void);
+
 /* Clear console */
 void console_clear(void);
 

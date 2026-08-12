@@ -212,7 +212,7 @@ Throughput: 6103.52 MB/s
 
 See [kernel/cpu/README.md](kernel/cpu/README.md) for detailed documentation on the CPU simulator.
 
-## Build & Run
+## 🛠️ Build & Run
 
 ### Prerequisites
 To build and run OrgitoOS, you'll need:
@@ -494,19 +494,21 @@ To remove build artifacts:
 make clean
 ```
 
+## 🌐 Project Website
+
+There is currently no GitHub Pages site for this project. A previous `docs/index.html` /
+`docs/404.html` landing page existed under an old repository name
+(`My-Operating-System-OpenOS`) that no longer exists, so its links were dead; it has
+been removed. A real project website may be added later.
+
 ### Repository layout
 
 | Path | Purpose |
 |------|---------|
-| `docs/index.html` | GitHub Pages landing page |
-| `docs/404.html` | Custom 404 page |
-| `docs/assets/style.css` | Website stylesheet |
 | `docs/architecture/` | Architecture documentation (Markdown) |
 | `docs/roadmap/` | Roadmap documentation (Markdown) |
 | `kernel/`, `arch/`, `memory/`, `drivers/` | OS source code |
 | `Makefile` | Build system |
-
-> **Note:** The `docs/` folder serves dual purpose — it hosts the GitHub Pages website (`index.html`, `404.html`, `assets/`) **and** the project's Markdown documentation (subdirectories like `architecture/`, `roadmap/`, etc.). OS source code lives outside `docs/` in directories such as `kernel/`, `arch/`, `memory/`, and `drivers/`.
 
 ---
 
@@ -540,9 +542,10 @@ The `/docs` directory contains comprehensive documentation organized by topic:
   - [Advanced Features](docs/architecture/ADVANCED_FEATURES.md) - IPC, SMP, GUI, networking, scripting
   - [VFS Implementation](docs/architecture/VFS_IMPLEMENTATION.md) - In-memory filesystem details
 - **Roadmap**: Development plans and milestones
-  - [Roadmap](docs/roadmap/roadmap.md) - Current status and future development plans
+  - [Roadmap](docs/roadmap/roadmap.md) - Completed status (all phases done)
+  - [Future Features](docs/roadmap/FUTURE_FEATURES.md) - What's next, prioritized
   - [Phase 0 Completion](docs/roadmap/UPGRADE_PHASE0.md) - Foundation implementation guide
-  - [Evolution Strategy](docs/roadmap/OS_EVOLUTION_STRATEGY.md) - 36-week development roadmap
+  - [Evolution Strategy](docs/roadmap/OS_EVOLUTION_STRATEGY.md) - Original broader wishlist, largely superseded by Future Features
 - **Boot**: Bootloader and startup documentation
   - [Multiboot Fix](docs/boot/MULTIBOOT_FIX.md) - GRUB multiboot header technical details
   - [GRUB Boot Fix](docs/boot/GRUB_BOOT_FIX.md) - QEMU boot order and GRUB2 device syntax fixes

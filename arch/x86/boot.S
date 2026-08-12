@@ -56,22 +56,40 @@
  * unrelocated by linker.ld (VMA == LMA == physical) - see that file's
  * header comment. Must be within the first 8 KiB of the physical image.
  *
- * The video-mode fields below are only present/valid because FLAGS bit 2
- * is set - no address fields are needed since FLAGS bit 16 (AOUT_KLUDGE)
- * stays unset for this ELF-loaded kernel. mode_type=0 requests a linear
- * graphics framebuffer (not EGA text). This is only a *request*: if the
- * bootloader can't satisfy it, it may fall back to text mode instead -
- * drivers/framebuffer.c's fb_init() checks multiboot_info's actual
- * reported framebuffer_type/bpp before ever using it, and
- * drivers/console.c falls back to the legacy VGA text buffer whenever
- * that check fails, so an unsatisfied request degrades gracefully rather
- * than producing a blank/broken console.
+ * The video-mode fields below are only *meaningful* because FLAGS bit 2
+ * is set - address fields still have to be *present* as zeroed padding
+ * even though FLAGS bit 16 (AOUT_KLUDGE) stays unset for this ELF-loaded
+ * kernel: GRUB's multiboot header parser (grub-core/loader/i386/
+ * multiboot.c) overlays the full spec struct - magic, flags, checksum,
+ * header_addr, load_addr, load_end_addr, bss_end_addr, entry_addr,
+ * mode_type, width, height, depth - onto whatever bytes follow the magic
+ * it found, and reads mode_type/width/height/depth from that struct's
+ * fixed offsets (32/36/40/44) regardless of which flags bits are set.
+ * Omitting the five AOUT_KLUDGE fields shifts every byte after checksum
+ * up by 20 bytes, so GRUB was reading mode_type out of the middle of
+ * _start's actual machine code ("unsupported graphical mode type
+ * -1070530544" was that misread, not a real mode). The AOUT_KLUDGE
+ * fields' *values* are never used since flags bit 16 is clear - only
+ * their offsets matter, hence zero.
+ *
+ * mode_type=0 requests a linear graphics framebuffer (not EGA text).
+ * This is only a *request*: if the bootloader can't satisfy it, it may
+ * fall back to text mode instead - drivers/framebuffer.c's fb_init()
+ * checks multiboot_info's actual reported framebuffer_type/bpp before
+ * ever using it, and drivers/console.c falls back to the legacy VGA text
+ * buffer whenever that check fails, so an unsatisfied request degrades
+ * gracefully rather than producing a blank/broken console.
  */
 .section .text.boot
     .align 4
     .long MAGIC
     .long FLAGS
     .long CHECKSUM
+    .long 0        /* header_addr  - unused (AOUT_KLUDGE unset), offset padding only */
+    .long 0        /* load_addr    - unused (AOUT_KLUDGE unset), offset padding only */
+    .long 0        /* load_end_addr - unused (AOUT_KLUDGE unset), offset padding only */
+    .long 0        /* bss_end_addr - unused (AOUT_KLUDGE unset), offset padding only */
+    .long 0        /* entry_addr   - unused (AOUT_KLUDGE unset), offset padding only */
     .long 0        /* mode_type: 0 = linear graphics framebuffer */
     .long 1024     /* width */
     .long 768      /* height */

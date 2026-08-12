@@ -94,6 +94,6 @@ echo ""
 # net_init()'s default guest IP 10.0.2.15/24, gateway 10.0.2.2
 qemu-system-i386 -cdrom "$ISO_FILE" -boot d \
     -netdev user,id=n0 -device rtl8139,netdev=n0 \
-    -hda "$DISK_IMG"
+    -drive file="$DISK_IMG",format=raw,if=ide
 
 echo -e "${YELLOW}QEMU exited${NC}"

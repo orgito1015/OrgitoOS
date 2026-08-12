@@ -23,7 +23,7 @@ QEMU_NET_FLAGS = -netdev user,id=n0 -device rtl8139,netdev=n0
 # point of it existing.
 DISK_IMG    = disk.img
 DISK_SIZE_MB = 16
-QEMU_DISK_FLAGS = -hda $(DISK_IMG)
+QEMU_DISK_FLAGS = -drive file=$(DISK_IMG),format=raw,if=ide
 QEMU_FLAGS = -cdrom $(ISO_FILE) -boot d $(QEMU_NET_FLAGS) $(QEMU_DISK_FLAGS)
 
 # Compiler selection: prefer cross-compiler, fallback to native gcc
