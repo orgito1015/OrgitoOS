@@ -494,31 +494,6 @@ To remove build artifacts:
 make clean
 ```
 
-## 🌐 GitHub Pages Website
-
-The project website is hosted on **GitHub Pages** and lives in the `docs/` directory of this repository.
-
-### Live URL
-
-```
-https://orgito1015.github.io/OrgitoOS/
-```
-
-*(This repository's remote is `github.com/orgito1015/OrgitoOS` — the Pages URL
-must match the current repo name. An older name, `My-Operating-System-OpenOS`,
-used to be linked here and pointed at a repo that no longer exists.)*
-
-### Enable GitHub Pages (repository owner)
-
-1. Go to **Settings → Pages** in this repository.
-2. Under **Build and deployment**, set:
-   - **Source**: `Deploy from a branch`
-   - **Branch**: `main`
-   - **Folder**: `/docs`
-3. Click **Save**.
-
-GitHub will publish the site within a minute or two. The URL above will go live once Pages is enabled.
-
 ### Repository layout
 
 | Path | Purpose |
