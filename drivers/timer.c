@@ -50,7 +50,7 @@ void timer_init(uint32_t frequency) {
  */
 void timer_handler(void) {
     system_ticks++;
-    
+
     /* Send EOI to PIC */
     pic_send_eoi(0);
 

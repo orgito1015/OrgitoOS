@@ -25,8 +25,6 @@ static ssize_t ramfs_write(vfs_node_t* node, uint32_t offset, uint32_t size, con
 static void ramfs_open(vfs_node_t* node);
 static void ramfs_close(vfs_node_t* node);
 static vfs_dirent_t* ramfs_readdir(vfs_node_t* node, uint32_t index);
-static vfs_node_t* ramfs_create_child(vfs_node_t* parent, const char* name, vfs_node_type_t type);
-static int ramfs_remove_child_op(vfs_node_t* parent, const char* name);
 
 /*
  * Allocate a node from the static pool
@@ -60,9 +58,7 @@ static vfs_node_t* allocate_node(void) {
             node->open = ramfs_open;
             node->close = ramfs_close;
             node->readdir = ramfs_readdir;
-            node->create_child = ramfs_create_child;
-            node->remove_child = ramfs_remove_child_op;
-
+            
             return node;
         }
     }
@@ -378,47 +374,6 @@ vfs_dirent_t* vfs_readdir(vfs_node_t* node, uint32_t index) {
     }
     
     return node->readdir(node, index);
-}
-
-/*
- * ramfs's create_child/remove_child: thin wrappers around the existing
- * allocate-then-link / unlink-then-free calls, so ramfs directories work
- * through the same vfs_mkchild()/vfs_unlink() entry points as any other
- * mounted filesystem (see fs/diskfs.c for the disk-backed equivalent).
- */
-static vfs_node_t* ramfs_create_child(vfs_node_t* parent, const char* name, vfs_node_type_t type) {
-    vfs_node_t* node = vfs_create_node(name, type);
-    if (!node) {
-        return 0;
-    }
-    if (vfs_add_child(parent, node) != 0) {
-        free_node(node);
-        return 0;
-    }
-    return node;
-}
-
-static int ramfs_remove_child_op(vfs_node_t* parent, const char* name) {
-    return vfs_remove_child(parent, name);
-}
-
-/*
- * Generic create/remove - dispatches through the target directory's own
- * create_child/remove_child, so callers don't need to know whether
- * `parent` is ramfs- or disk-backed.
- */
-vfs_node_t* vfs_mkchild(vfs_node_t* parent, const char* name, vfs_node_type_t type) {
-    if (!parent || parent->type != NODE_DIRECTORY || !parent->create_child) {
-        return 0;
-    }
-    return parent->create_child(parent, name, type);
-}
-
-int vfs_unlink(vfs_node_t* parent, const char* name) {
-    if (!parent || parent->type != NODE_DIRECTORY || !parent->remove_child) {
-        return -1;
-    }
-    return parent->remove_child(parent, name);
 }
 
 /*

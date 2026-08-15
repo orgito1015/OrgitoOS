@@ -184,41 +184,12 @@ void* memset(void* ptr, int value, size_t num) {
     return ptr;
 }
 
-int memcmp(const void* a, const void* b, size_t n) {
-    const unsigned char* pa = (const unsigned char*)a;
-    const unsigned char* pb = (const unsigned char*)b;
-    for (size_t i = 0; i < n; i++) {
-        if (pa[i] != pb[i]) {
-            return (int)pa[i] - (int)pb[i];
-        }
-    }
-    return 0;
-}
-
 char* strchr(const char* str, int ch) {
     while (*str) {
         if (*str == (char)ch) {
             return (char*)str;
         }
         str++;
-    }
-    return NULL;
-}
-
-char* strstr(const char* haystack, const char* needle) {
-    if (!*needle) {
-        return (char*)haystack;
-    }
-    for (; *haystack; haystack++) {
-        const char* h = haystack;
-        const char* n = needle;
-        while (*h && *n && *h == *n) {
-            h++;
-            n++;
-        }
-        if (*n == '\0') {
-            return (char*)haystack;
-        }
     }
     return NULL;
 }

@@ -9,21 +9,15 @@
 #include "gdt.h"
 #include "../../kernel/string.h"
 
-#define GDT_FIXED_ENTRIES 5   /* null, kernel code, kernel data, user code, user data */
-#define GDT_ENTRIES (GDT_FIXED_ENTRIES + MAX_CPUS)
+#define GDT_ENTRIES 6
 
 static struct gdt_entry gdt[GDT_ENTRIES];
 static struct gdt_ptr   gdtp;
-static struct tss_entry tss[MAX_CPUS];
+static struct tss_entry tss;
 
-/* gdt_flush() is declared in gdt.h (arch/x86/context.S defines it).
- * tss_flush() (CPU 0/BSP only) is used internally here; every other CPU
- * uses load_tr()/tss_flush_for_cpu() below instead. */
+/* Assembly helpers (arch/x86/context.S) */
+extern void gdt_flush(uint32_t gdtp_addr);
 extern void tss_flush(void);
-
-static inline void load_tr(uint16_t selector) {
-    __asm__ __volatile__("ltr %0" : : "r"(selector));
-}
 
 /* Encode one descriptor */
 static void gdt_set_gate(int num, uint32_t base, uint32_t limit,
@@ -57,39 +51,30 @@ void gdt_init(void) {
     /* 0x20: user data - base 0, limit 4 GiB, ring 3, read/write */
     gdt_set_gate(4, 0, 0xFFFFF, 0xF2, 0xCF);
 
-    /* 0x28..: one TSS descriptor per possible CPU (access 0x89 = present,
-     * ring 0, 32-bit TSS). Only CPU 0's is actually loaded here; every
-     * other CPU loads its own via tss_flush_for_cpu() as it comes online. */
-    for (uint32_t cpu = 0; cpu < MAX_CPUS; cpu++) {
-        uint32_t base  = (uint32_t)&tss[cpu];
-        uint32_t limit = sizeof(tss[cpu]) - 1;
+    /* 0x28: TSS descriptor (access 0x89 = present, ring 0, 32-bit TSS) */
+    {
+        uint32_t base  = (uint32_t)&tss;
+        uint32_t limit = sizeof(tss) - 1;
 
-        uint8_t *p = (uint8_t *)&tss[cpu];
-        for (uint32_t i = 0; i < sizeof(tss[cpu]); i++) {
+        /* Zero the TSS */
+        uint8_t *p = (uint8_t *)&tss;
+        for (uint32_t i = 0; i < sizeof(tss); i++) {
             p[i] = 0;
         }
 
-        tss[cpu].ss0  = GDT_KERNEL_DATA;
-        tss[cpu].esp0 = 0;   /* Set per-process by the scheduler */
+        tss.ss0  = GDT_KERNEL_DATA;
+        tss.esp0 = 0;   /* Set per-process by the scheduler */
         /* No I/O permission bitmap: base beyond the segment limit */
-        tss[cpu].iomap_base = sizeof(tss[cpu]);
+        tss.iomap_base = sizeof(tss);
 
-        gdt_set_gate(GDT_FIXED_ENTRIES + (int)cpu, base, limit, 0x89, 0x00);
+        gdt_set_gate(5, base, limit, 0x89, 0x00);
     }
 
-    /* Load the GDT (reloads CS via far jump and data segments) and CPU 0's TSS */
+    /* Load the GDT (reloads CS via far jump and data segments) and TSS */
     gdt_flush((uint32_t)&gdtp);
     tss_flush();
 }
 
 void tss_set_kernel_stack(uint32_t esp0) {
-    tss[smp_get_current_cpu()].esp0 = esp0;
-}
-
-void tss_flush_for_cpu(uint32_t cpu_id) {
-    load_tr(GDT_TSS_SELECTOR(cpu_id));
-}
-
-uint32_t gdt_get_ptr_addr(void) {
-    return (uint32_t)&gdtp;
+    tss.esp0 = esp0;
 }

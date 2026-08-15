@@ -56,14 +56,6 @@ typedef struct vfs_node {
     void (*open)(struct vfs_node*);
     void (*close)(struct vfs_node*);
     struct vfs_dirent* (*readdir)(struct vfs_node*, uint32_t);
-
-    /* Per-directory creation/removal hooks, so a mounted filesystem
-     * (e.g. fs/diskfs.c) can allocate its own backing storage for new
-     * children instead of always going through the ramfs static pool.
-     * Set on every node (ramfs included) by whichever filesystem
-     * allocated it - see vfs_mkchild()/vfs_unlink() below. */
-    struct vfs_node* (*create_child)(struct vfs_node* parent, const char* name, vfs_node_type_t type);
-    int (*remove_child)(struct vfs_node* parent, const char* name);
 } vfs_node_t;
 
 /* VFS initialization */
@@ -76,14 +68,6 @@ vfs_node_t* vfs_find_node(vfs_node_t* parent, const char* name);
 int vfs_add_child(vfs_node_t* parent, vfs_node_t* child);
 int vfs_remove_child(vfs_node_t* parent, const char* name);
 vfs_node_t* vfs_resolve_path(const char* path);
-
-/* Generic create/remove: dispatches through parent->create_child /
- * parent->remove_child, so callers (shell commands) work the same way
- * whether `parent` is ramfs- or disk-backed. Prefer these over
- * vfs_create_node()+vfs_add_child() / vfs_remove_child() directly
- * unless you specifically want the ramfs pool. */
-vfs_node_t* vfs_mkchild(vfs_node_t* parent, const char* name, vfs_node_type_t type);
-int vfs_unlink(vfs_node_t* parent, const char* name);
 
 /* File operations */
 ssize_t vfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, uint8_t* buffer);

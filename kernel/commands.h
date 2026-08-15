@@ -25,11 +25,7 @@ void cmd_mkdir(int argc, char** argv);
 void cmd_touch(int argc, char** argv);
 void cmd_write(int argc, char** argv);
 void cmd_rm(int argc, char** argv);
-void cmd_grep(int argc, char** argv);
-void cmd_wc(int argc, char** argv);
 void cmd_meminfo(int argc, char** argv);
-void cmd_ping(int argc, char** argv);
-void cmd_tcpconnect(int argc, char** argv);
 void cmd_reboot(int argc, char** argv);
 
 /* New feature test commands */
@@ -49,6 +45,5 @@ void cmd_counters(int argc, char** argv);
 void cmd_uecho(int argc, char** argv);
 void cmd_psleep(int argc, char** argv);
 void cmd_sched(int argc, char** argv);
-void cmd_exec(int argc, char** argv);
 
 #endif /* ORGITOOS_KERNEL_COMMANDS_H */

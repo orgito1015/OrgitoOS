@@ -441,16 +441,16 @@ This refactoring successfully reorganized OrgitoOS into a modular monolithic arc
 
 ## Resources
 
-- [ARCHITECTURE.md](ARCHITECTURE.md) - Detailed architecture documentation
-- [README.md](../README.md) - Updated project README
-- [Makefile](../Makefile) - New build system
-- [Include files](../include/) - Common headers
+- [ARCHITECTURE.md](../architecture/ARCHITECTURE.md) - Detailed architecture documentation
+- [README.md](../../README.md) - Updated project README
+- [Makefile](../../Makefile) - New build system
+- [Include files](../../include/) - Common headers
 
 ## Questions?
 
 For questions about the refactoring:
 
-1. Check [ARCHITECTURE.md](ARCHITECTURE.md) for design details
+1. Check [ARCHITECTURE.md](../architecture/ARCHITECTURE.md) for design details
 2. Review this document for migration information
 3. Check the Makefile for build details
 4. Open an issue on GitHub for specific problems

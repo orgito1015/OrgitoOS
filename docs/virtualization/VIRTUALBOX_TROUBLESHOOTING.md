@@ -232,10 +232,13 @@ VBoxManage startvm "OrgitoOS"
 ## Known Limitations
 
 Current version limitations:
-- Text mode only (no graphics)
+- Text mode only (no real VESA/VBE graphics output; there's a simulated
+  in-memory GUI framebuffer, but it's never displayed)
 - Basic keyboard support (no function keys, no international layouts)
-- No file system
-- No networking
+- File system is in-memory only (ramfs) — no disk driver, nothing persists across reboots
+- Networking data structures exist but packet TX/RX and socket send/receive are stubs
 - No storage devices
+- Ring-3 execution (`forktest`/`user`/`counters` shell commands) has a known,
+  unresolved crash bug — see [../roadmap/roadmap.md](../roadmap/roadmap.md)
 
-These are planned features for future releases!
+See [../roadmap/roadmap.md](../roadmap/roadmap.md) for the full, up-to-date status.

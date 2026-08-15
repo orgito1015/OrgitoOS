@@ -73,13 +73,13 @@ See [docs/architecture/ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md) for d
 - ✅ **Process control blocks** - PID/PPID, state, priority, kernel/user stacks (`process/process.h`)
 - ✅ **Context switching** - Callee-saved register switch on the kernel stack (`arch/x86/context.S`)
 - ✅ **Multilevel round-robin scheduler** - 3 priority levels with anti-starvation aging, 50ms quantum (`process/scheduler.c`)
-- ✅ **Ring 3 user mode** - GDT/TSS-based privilege transitions (`arch/x86/gdt.c`, `context.S`)
+- ⚠️ **Ring 3 user mode** - GDT/TSS-based privilege transitions (`arch/x86/gdt.c`, `context.S`); IRET into ring 3 and the first syscall both work, but the `forktest`/`user`/`counters` shell commands crash with an Invalid Opcode exception shortly after — a real, unresolved bug in ring-3 execution under real (non-single-stepped) interrupt timing, not a scheduler/race issue (both of those were checked and ruled out)
 - ✅ **System calls** - `int 0x80` gate with `exit`/`write`/`getpid`/`fork`/`yield`/`sleep`/`getppid`/`wait` (`kernel/syscall.c`)
 - ✅ **Kernel heap allocator** - `kmalloc`/`kfree` first-fit free list (`memory/heap.c`)
-- ✅ **Shell process commands** - `ps`, `kill`, `spawn`, `forktest`, `user`, `sched`, `psleep`, `counters`, `uecho` (`kernel/proc_commands.c`)
+- ⚠️ **Shell process commands** - `ps`, `kill`, `spawn`, `sched`, `psleep` work; `forktest`, `user`, `counters`, `uecho` launch a ring-3 process but currently crash it (see above) (`kernel/proc_commands.c`)
 - ✅ **`read()` syscall** - ring 3 processes can now read a line of keyboard input via `int 0x80` (`kernel/syscall.c`, `include/usyscall.h`), demoed by the `uecho` shell command
 
-### Phase 2 - Address Space Isolation & Further Hardening (✅ Complete)
+### Phase 2 - Address Space Isolation & Further Hardening (In Progress)
 - ✅ **Per-process page directories** with private, non-shared physical user stacks
 - ✅ **Kernel/user memory protection** - the identity map is supervisor-only by
   default; only the kernel's `.text` stays `PTE_USER` (ring 3 "processes" are
@@ -87,48 +87,10 @@ See [docs/architecture/ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md) for d
   table (PCBs), and other processes' kernel stacks are no longer reachable from
   ring 3. Ring-3 faults now kill just the offending process instead of halting
   the whole system (`memory/vmm.c`, `arch/x86/exceptions.c`)
-- ✅ **Real networking** - a PCI-enumerated RTL8139 NIC driver (`drivers/rtl8139.c`)
-  drives real packet TX/RX; `kernel/network.c` builds a genuine Ethernet/ARP/IP/
-  ICMP/UDP/TCP stack on top, with a working `ping` command, `net_socket_send`/
-  `net_socket_recv` over real UDP datagrams, and a minimal client-only TCP state
-  machine (`tcpconnect <ip> <port> [message]`: real 3-way handshake, established
-  send/recv, FIN close - no listen/accept, no retransmission).
-- ✅ **SMP with a real per-CPU scheduler** - `kernel/apic.c` parses ACPI's RSDP/
-  RSDT/MADT for real Local APIC IDs; `kernel/smp.c` drives the INIT-SIPI-SIPI
-  sequence and `arch/x86/trampoline.S` takes each AP from 16-bit real mode into
-  32-bit protected mode. APs come online one at a time and, once up, are fully
-  schedulable: own TSS, own idle process, own LAPIC-timer preemption source
-  (`process/percpu.c` gives every CPU independent ready queues and a
-  `current_process`), with work-stealing load balancing when a CPU runs out
-  of local work (`process/scheduler.c`).
-- ✅ **Shell pipe redirection between commands** - `cmd1 | cmd2 | ...` pipelines
-  in `kernel/shell.c` capture each stage's output and feed it as real stdin to
-  the next stage, with new pipe-aware filter commands `grep` and `wc`.
-- ✅ **`exec()`** - `kernel/exec.c` loads real, statically-linked ELF32 binaries
-  from the VFS and spawns them as new processes with private, freshly mapped
-  pages, instead of jumping to a kernel-linked function pointer. A demo binary
-  is preloaded to `/bin/hello` (`exec /bin/hello`). `fork()` of an already-exec()'d
-  process is supported: `process_t.exec_pages` records each page's virtual
-  address and flags so `sys_fork()` can deep-copy the image into the child.
-- ✅ **Command history** - `drivers/keyboard.c` keeps a 16-entry ring buffer;
-  Up/Down arrow recalls and redraws a previous line, for both the shell prompt
-  and any process's `read()`.
-- ✅ **Higher-half kernel** - the kernel now actually runs from
-  `KERNEL_VIRTUAL_BASE` (0xC0000000, dual-mapped alongside the existing low
-  identity map - see `memory/vmm.c`). `arch/x86/boot.S` builds a temporary
-  64 MiB PSE identity+high-alias mapping, enables paging, and jumps into
-  the higher-half-linked kernel body before `vmm_init()` builds the
-  permanent mapping.
-- ✅ **On-disk persistence** - `drivers/ata.c` (ATA/IDE PIO) plus `fs/diskfs.c`
-  ("OrgitoFS": superblock + inode table + block bitmap) mount a real, persistent
-  filesystem at `/mnt`, backed by `disk.img`.
-- ✅ **Real graphics output** - `arch/x86/boot.S` requests a linear framebuffer
-  via the Multiboot video-mode fields (no BIOS/VM86 calls needed); when the
-  bootloader honors it, `drivers/console.c` renders the shell through real
-  pixels and a small bitmap font instead of the VGA text buffer, and
-  `kernel/gui.c`'s simulated framebuffer can be shown on screen via
-  `gui_flip_to_screen()`. Falls back to the original VGA text console
-  automatically whenever no usable framebuffer is reported.
+- 🔲 Real networking (packet TX/RX, socket send/receive — currently stubs)
+- 🔲 SMP Application Processor bring-up (CPU detection works; APIC-driven boot does not)
+- 🔲 Shell pipe redirection between commands
+- 🔲 `exec()` - user code is still kernel-linked function pointers, not loaded binaries
 - And more! See [roadmap.md](docs/roadmap/roadmap.md)
 
 ##  Quick Start
@@ -297,8 +259,6 @@ OrgitoOS includes a built-in shell with the following commands:
 | `rm <name>...` | Remove file(s) or directory entries |
 | `meminfo` | Show physical (PMM) and kernel heap memory usage |
 | `reboot` | Reboot the system |
-| `ping <ip>` | Send a real ICMP echo request and wait for a reply |
-| `tcpconnect <ip> <port> [message]` | Connect over real TCP (3-way handshake), optionally send/recv, then close |
 | `ps` | List processes (pid, ppid, state, priority, cpu, name) |
 | `kill <pid>` | Terminate a process by pid |
 | `spawn [n]` | Launch demo kernel threads (workers) |
@@ -494,21 +454,44 @@ To remove build artifacts:
 make clean
 ```
 
-## 🌐 Project Website
+## 🌐 GitHub Pages Website
 
-There is currently no GitHub Pages site for this project. A previous `docs/index.html` /
-`docs/404.html` landing page existed under an old repository name
-(`My-Operating-System-OpenOS`) that no longer exists, so its links were dead; it has
-been removed. A real project website may be added later.
+The project website is hosted on **GitHub Pages** and lives in the `docs/` directory of this repository.
+
+### Live URL
+
+```
+https://orgito1015.github.io/OrgitoOS/
+```
+
+*(This repository's remote is `github.com/orgito1015/OrgitoOS` — the Pages URL
+must match the current repo name. An older name, `My-Operating-System-OpenOS`,
+used to be linked here and pointed at a repo that no longer exists.)*
+
+### Enable GitHub Pages (repository owner)
+
+1. Go to **Settings → Pages** in this repository.
+2. Under **Build and deployment**, set:
+   - **Source**: `Deploy from a branch`
+   - **Branch**: `main`
+   - **Folder**: `/docs`
+3. Click **Save**.
+
+GitHub will publish the site within a minute or two. The URL above will go live once Pages is enabled.
 
 ### Repository layout
 
 | Path | Purpose |
 |------|---------|
+| `docs/index.html` | GitHub Pages landing page |
+| `docs/404.html` | Custom 404 page |
+| `docs/assets/style.css` | Website stylesheet |
 | `docs/architecture/` | Architecture documentation (Markdown) |
 | `docs/roadmap/` | Roadmap documentation (Markdown) |
 | `kernel/`, `arch/`, `memory/`, `drivers/` | OS source code |
 | `Makefile` | Build system |
+
+> **Note:** The `docs/` folder serves dual purpose — it hosts the GitHub Pages website (`index.html`, `404.html`, `assets/`) **and** the project's Markdown documentation (subdirectories like `architecture/`, `roadmap/`, etc.). OS source code lives outside `docs/` in directories such as `kernel/`, `arch/`, `memory/`, and `drivers/`.
 
 ---
 
@@ -542,10 +525,9 @@ The `/docs` directory contains comprehensive documentation organized by topic:
   - [Advanced Features](docs/architecture/ADVANCED_FEATURES.md) - IPC, SMP, GUI, networking, scripting
   - [VFS Implementation](docs/architecture/VFS_IMPLEMENTATION.md) - In-memory filesystem details
 - **Roadmap**: Development plans and milestones
-  - [Roadmap](docs/roadmap/roadmap.md) - Completed status (all phases done)
-  - [Future Features](docs/roadmap/FUTURE_FEATURES.md) - What's next, prioritized
+  - [Roadmap](docs/roadmap/roadmap.md) - Current status and future development plans
   - [Phase 0 Completion](docs/roadmap/UPGRADE_PHASE0.md) - Foundation implementation guide
-  - [Evolution Strategy](docs/roadmap/OS_EVOLUTION_STRATEGY.md) - Original broader wishlist, largely superseded by Future Features
+  - [Evolution Strategy](docs/roadmap/OS_EVOLUTION_STRATEGY.md) - 36-week development roadmap
 - **Boot**: Bootloader and startup documentation
   - [Multiboot Fix](docs/boot/MULTIBOOT_FIX.md) - GRUB multiboot header technical details
   - [GRUB Boot Fix](docs/boot/GRUB_BOOT_FIX.md) - QEMU boot order and GRUB2 device syntax fixes
@@ -568,7 +550,7 @@ reference this project follows. Articles most relevant to what's implemented her
 
 | Subsystem | This codebase | OSDev Wiki articles |
 |---|---|---|
-| Boot/build | `arch/x86/boot.S`, `linker.ld`, `Makefile` | [Meaty Skeleton](https://wiki.osdev.org/Meaty_Skeleton), [Multiboot](https://wiki.osdev.org/Multiboot), [Higher Half Bare Bones](https://wiki.osdev.org/Higher_Half_Bare_Bones) *(implemented — see roadmap)* |
+| Boot/build | `arch/x86/boot.S`, `linker.ld`, `Makefile` | [Meaty Skeleton](https://wiki.osdev.org/Meaty_Skeleton), [Multiboot](https://wiki.osdev.org/Multiboot), [Higher Half Bare Bones](https://wiki.osdev.org/Higher_Half_Bare_Bones) *(relevant since `KERNEL_VIRTUAL_BASE` is defined but unused — see roadmap)* |
 | Interrupts | `arch/x86/idt.c`, `isr.S`, `pic.c` | [Interrupt Descriptor Table](https://wiki.osdev.org/Interrupt_Descriptor_Table), [Interrupts Tutorial](https://wiki.osdev.org/Interrupts_tutorial), [Programmable Interval Timer](https://wiki.osdev.org/Programmable_Interval_Timer), [PS/2 Keyboard](https://wiki.osdev.org/PS/2_Keyboard) |
 | Memory | `memory/pmm.c`, `memory/vmm.c` | [Memory Management](https://wiki.osdev.org/Memory_Management), [Page Frame Allocation](https://wiki.osdev.org/Page_Frame_Allocation), [Paging](https://wiki.osdev.org/Paging) |
 | Processes | `process/`, `arch/x86/context.S`, `gdt.c` | [Kernel Multitasking](https://wiki.osdev.org/Kernel_Multitasking), [Context Switching](https://wiki.osdev.org/Context_Switching), [Getting to Ring 3](https://wiki.osdev.org/Getting_to_Ring_3), [Going Further on x86](https://wiki.osdev.org/Going_Further_on_x86) |
@@ -576,16 +558,13 @@ reference this project follows. Articles most relevant to what's implemented her
 
 ##  Project Stats
 
-- **Lines of Code**: ~15,000 (kernel source: C, x86 assembly, headers)
-- **Source Files**: 98 (organized across `arch/`, `kernel/`, `memory/`, `drivers/`,
-  `fs/`, `process/`, `include/`, `userland/`)
+- **Lines of Code**: ~2,400 (kernel + documentation)
+- **Source Files**: 33 (organized in 7 directories)
 - **Exception Handlers**: 32 (all x86 exceptions)
-- **Memory Management**: PMM + VMM, higher-half kernel (dual-mapped, see
-  [roadmap.md](docs/roadmap/roadmap.md))
-- **Drivers**: Console (VGA text + real linear framebuffer), Keyboard (PS/2),
-  Timer (PIT), Serial (COM1), ATA/IDE (disk), RTL8139 (NIC)
+- **Memory Management**: PMM + VMM (fully implemented)
+- **Drivers**: Console (VGA), Keyboard (PS/2), Timer (PIT)
 - **Supported Platforms**: QEMU, VirtualBox, Bochs
-- **Documentation**: ~8,200 lines (root docs + `docs/`)
+- **Documentation**: 20,000+ lines (including architecture docs)
 
 ## License
 MIT License — free to use, modify, and contribute.

@@ -7,20 +7,13 @@
 #include <stdint.h>
 
 /*
- * Kernel image *physical* boundaries, provided by the linker script
- * (linker.ld). These are addresses, not variables; only their &-address
- * is meaningful. The range [kernel_start_phys, kernel_end_phys) is the
- * physical memory occupied by the loaded kernel and must never be handed
- * out by the allocator.
- *
- * Deliberately the _phys symbols, not kernel_start/kernel_end: since the
- * kernel is linked higher-half (KERNEL_VIRTUAL_BASE = 0xC0000000,
- * linker.ld), kernel_start/kernel_end now resolve to virtual addresses -
- * using those here would reserve the wrong (unmapped-as-RAM) region and
- * leave the kernel's real physical footprint unprotected.
+ * Kernel image boundaries, provided by the linker script (linker.ld).
+ * These are addresses, not variables; only their &-address is meaningful.
+ * The range [kernel_start, kernel_end) is the physical memory occupied by
+ * the loaded kernel and must never be handed out by the allocator.
  */
-extern uint8_t kernel_start_phys[];
-extern uint8_t kernel_end_phys[];
+extern uint8_t kernel_start[];
+extern uint8_t kernel_end[];
 
 /* Bitmap to track page frame usage (1 bit per page) */
 static uint8_t pmm_bitmap[PMM_BITMAP_SIZE];
@@ -111,8 +104,8 @@ void pmm_init(struct multiboot_info *mboot) {
         /* Reserve page 0 (null / real-mode IVT+BDA) and the kernel image so
          * the allocator never returns memory the running kernel occupies. */
         reserve_range(0, PMM_PAGE_SIZE);
-        reserve_range((uint64_t)(uintptr_t)kernel_start_phys,
-                      (uint64_t)(uintptr_t)kernel_end_phys);
+        reserve_range((uint64_t)(uintptr_t)kernel_start,
+                      (uint64_t)(uintptr_t)kernel_end);
 
         /* Recount used pages after reservations. */
         used_pages = 0;
@@ -165,13 +158,13 @@ void pmm_init(struct multiboot_info *mboot) {
      * Reserve regions the allocator must never hand out, even if the memory
      * map reported them as available:
      *   - page 0: null pointer guard / real-mode IVT + BIOS data area
-     *   - the kernel image itself: [kernel_start_phys, kernel_end_phys)
+     *   - the kernel image itself: [kernel_start, kernel_end)
      * Without the kernel reservation, the very first allocation returns the
      * kernel's own load address (0x100000) and corrupts the running kernel.
      */
     reserve_range(0, PMM_PAGE_SIZE);
-    reserve_range((uint64_t)(uintptr_t)kernel_start_phys,
-                  (uint64_t)(uintptr_t)kernel_end_phys);
+    reserve_range((uint64_t)(uintptr_t)kernel_start,
+                  (uint64_t)(uintptr_t)kernel_end);
 
     /* Count used pages */
     used_pages = 0;

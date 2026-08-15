@@ -10,25 +10,10 @@ OUTPUT_BIN = $(OUTPUT_DIR)/$(TARGET).bin
 # QEMU settings
 QEMU     = qemu-system-i386
 ISO_FILE = orgitoos.iso
-# -device rtl8139: pin the emulated NIC explicitly rather than relying on
-# QEMU's default (which varies by version/machine type) - drivers/rtl8139.c
-# only knows how to drive this one chip. -netdev user gives it QEMU's
-# built-in SLIRP network (guest 10.0.2.15/24, gateway 10.0.2.2), matching
-# kernel/network.c's net_init() defaults - `ping 10.0.2.2` should work
-# out of the box.
-QEMU_NET_FLAGS = -netdev user,id=n0 -device rtl8139,netdev=n0
-# Persistent data disk for drivers/ata.c + fs/diskfs.c (mounted at /mnt).
-# A raw flat image, not touched by `make clean` - it's user data, exactly
-# like a real hard disk, and surviving reboots/rebuilds is the entire
-# point of it existing.
-DISK_IMG    = disk.img
-DISK_SIZE_MB = 16
-QEMU_DISK_FLAGS = -drive file=$(DISK_IMG),format=raw,if=ide
-QEMU_FLAGS = -cdrom $(ISO_FILE) -boot d $(QEMU_NET_FLAGS) $(QEMU_DISK_FLAGS)
+QEMU_FLAGS = -cdrom $(ISO_FILE) -boot d
 
 # Compiler selection: prefer cross-compiler, fallback to native gcc
 CC := $(shell command -v i686-elf-gcc 2> /dev/null || echo gcc)
-OBJCOPY := $(shell command -v i686-elf-objcopy 2> /dev/null || echo objcopy)
 
 ifeq ($(CC),gcc)
 $(warning No i686-elf-gcc cross-compiler found on PATH; falling back to host gcc -m32. \
@@ -83,19 +68,17 @@ PROCESS_DIR = process
 # C sources (arch/x86/exceptions.S below shares a basename with
 # arch/x86/exceptions.c, so its object gets an explicit rule/name further
 # down instead of going through the generic pattern rule).
-C_SOURCES = $(ARCH_DIR)/gdt.c $(ARCH_DIR)/idt.c $(ARCH_DIR)/pic.c $(ARCH_DIR)/irq.c $(ARCH_DIR)/exceptions.c \
+C_SOURCES = $(ARCH_DIR)/gdt.c $(ARCH_DIR)/idt.c $(ARCH_DIR)/pic.c $(ARCH_DIR)/exceptions.c \
             $(KERNEL_DIR)/kernel.c $(KERNEL_DIR)/syscall.c $(KERNEL_DIR)/user_programs.c \
             $(KERNEL_DIR)/proc_commands.c $(KERNEL_DIR)/panic.c $(KERNEL_DIR)/string.c \
             $(KERNEL_DIR)/shell.c $(KERNEL_DIR)/commands.c $(KERNEL_DIR)/ipc.c \
-            $(KERNEL_DIR)/exec.c $(KERNEL_DIR)/pci.c \
-            $(KERNEL_DIR)/smp.c $(KERNEL_DIR)/apic.c $(KERNEL_DIR)/gui.c $(KERNEL_DIR)/network.c $(KERNEL_DIR)/script.c \
+            $(KERNEL_DIR)/smp.c $(KERNEL_DIR)/gui.c $(KERNEL_DIR)/network.c $(KERNEL_DIR)/script.c \
             $(CPU_DIR)/pipeline.c $(CPU_DIR)/single_cycle.c $(CPU_DIR)/performance.c \
             $(MEMORY_DIR)/pmm.c $(MEMORY_DIR)/vmm.c $(MEMORY_DIR)/heap.c \
             $(MEMORY_DIR)/cache.c $(MEMORY_DIR)/bus.c \
             $(DRIVERS_DIR)/console.c $(DRIVERS_DIR)/serial.c $(DRIVERS_DIR)/keyboard.c $(DRIVERS_DIR)/timer.c \
-            $(DRIVERS_DIR)/rtl8139.c $(DRIVERS_DIR)/ata.c $(DRIVERS_DIR)/framebuffer.c \
-            $(FS_DIR)/vfs.c $(FS_DIR)/diskfs.c \
-            $(PROCESS_DIR)/process.c $(PROCESS_DIR)/scheduler.c $(PROCESS_DIR)/percpu.c
+            $(FS_DIR)/vfs.c \
+            $(PROCESS_DIR)/process.c $(PROCESS_DIR)/scheduler.c
 
 # Assembly sources (excluding exceptions.S, handled separately above)
 ASM_SOURCES = $(ARCH_DIR)/boot.S $(ARCH_DIR)/isr.S $(ARCH_DIR)/context.S $(ARCH_DIR)/syscall.S
@@ -105,14 +88,7 @@ C_OBJS   = $(patsubst %.c,$(OBJDIR)/%.o,$(C_SOURCES))
 ASM_OBJS = $(patsubst %.S,$(OBJDIR)/%.o,$(ASM_SOURCES))
 EXCEPTIONS_ASM_OBJ = $(OBJDIR)/$(ARCH_DIR)/exceptions_asm.o
 
-USERLAND_DIR = userland
-USERLAND_OBJDIR = $(OBJDIR)/userland
-USERLAND_EMBED_OBJ = $(USERLAND_OBJDIR)/hello_embed.o
-
-TRAMPOLINE_OBJDIR = $(OBJDIR)/$(ARCH_DIR)
-TRAMPOLINE_EMBED_OBJ = $(TRAMPOLINE_OBJDIR)/trampoline_embed.o
-
-OBJS = $(C_OBJS) $(ASM_OBJS) $(EXCEPTIONS_ASM_OBJ) $(USERLAND_EMBED_OBJ) $(TRAMPOLINE_EMBED_OBJ)
+OBJS = $(C_OBJS) $(ASM_OBJS) $(EXCEPTIONS_ASM_OBJ)
 
 # Default target: build the kernel
 all: $(OUTPUT_BIN)
@@ -132,74 +108,6 @@ $(OBJDIR)/%.o: %.S
 $(EXCEPTIONS_ASM_OBJ): $(ARCH_DIR)/exceptions.S
 	@mkdir -p $(dir $@)
 	$(CC) $(ASFLAGS) $(DEPFLAGS) -c $< -o $@
-
-# ---------------------------------------------------------------------
-# Userland demo binary (userland/hello.c), embedded into the kernel.
-#
-# Built as its own freestanding ELF32 executable (userland/user.ld),
-# completely separate from the kernel image/linker.ld, then objcopy'd
-# into a plain byte blob and linked into the kernel as
-# _binary_hello_elf_{start,end,size} (kernel/exec.c reads these to
-# preload /bin/hello at boot). This is what makes `exec /bin/hello` load
-# a real compiled-and-linked binary instead of a kernel-linked function
-# pointer (kernel/user_programs.c's demo programs).
-#
-# These rules must stay below the `all` target above: GNU Make's default
-# goal is the first rule textually in the file, and these are pulled in
-# as a prerequisite of $(OUTPUT_BIN) via $(OBJS), not invoked by name -
-# if they appeared before `all`, plain `make` would build only the
-# userland binary instead of the kernel.
-# ---------------------------------------------------------------------
-USERLAND_CFLAGS = -std=gnu99 -ffreestanding -O2 -Wall -Wextra -m32 \
-                  -fno-pic -fno-stack-protector -fno-omit-frame-pointer \
-                  -nostdlib -nostartfiles -nodefaultlibs -I./include
-USERLAND_ELF = $(USERLAND_OBJDIR)/hello.elf
-
-$(USERLAND_OBJDIR)/hello.o: $(USERLAND_DIR)/hello.c
-	@mkdir -p $(dir $@)
-	$(CC) $(USERLAND_CFLAGS) -c $< -o $@
-
-$(USERLAND_ELF): $(USERLAND_OBJDIR)/hello.o $(USERLAND_DIR)/user.ld
-	@mkdir -p $(dir $@)
-	$(CC) -T $(USERLAND_DIR)/user.ld -o $@ -m32 -ffreestanding -nostdlib -static \
-		-Wl,--nmagic -Wl,-s $(USERLAND_OBJDIR)/hello.o
-
-# objcopy runs from inside $(USERLAND_OBJDIR) so the generated symbol
-# names are the short, predictable _binary_hello_elf_* (objcopy derives
-# them from the input path, special characters become underscores - a
-# longer relative path would leak into the symbol names).
-$(USERLAND_EMBED_OBJ): $(USERLAND_ELF)
-	cd $(USERLAND_OBJDIR) && $(OBJCOPY) -I binary -O elf32-i386 -B i386 hello.elf hello_embed.o
-
-# ---------------------------------------------------------------------
-# AP real-mode trampoline (arch/x86/trampoline.S), embedded into the
-# kernel the same way as the userland binary above: assembled and
-# linked as its own tiny executable at a fixed physical load address
-# (arch/x86/trampoline.ld, `. = 0x8000`) completely separate from the
-# kernel image, flattened to raw bytes, then objcopy'd in as
-# _binary_trampoline_bin_{start,end,size} (kernel/smp.c copies these
-# bytes to physical 0x8000 before sending any AP its SIPI).
-# ---------------------------------------------------------------------
-TRAMPOLINE_ELF   = $(TRAMPOLINE_OBJDIR)/trampoline.elf
-TRAMPOLINE_BIN   = $(TRAMPOLINE_OBJDIR)/trampoline.bin
-
-$(TRAMPOLINE_OBJDIR)/trampoline.o: $(ARCH_DIR)/trampoline.S
-	@mkdir -p $(dir $@)
-	$(CC) $(ASFLAGS) -c $< -o $@
-
-$(TRAMPOLINE_ELF): $(TRAMPOLINE_OBJDIR)/trampoline.o $(ARCH_DIR)/trampoline.ld
-	@mkdir -p $(dir $@)
-	$(CC) -T $(ARCH_DIR)/trampoline.ld -o $@ -m32 -ffreestanding -nostdlib -static \
-		-Wl,--nmagic -Wl,-s $(TRAMPOLINE_OBJDIR)/trampoline.o
-
-$(TRAMPOLINE_BIN): $(TRAMPOLINE_ELF)
-	$(OBJCOPY) -O binary $< $@
-
-# objcopy runs from inside $(TRAMPOLINE_OBJDIR) for the same reason as
-# the userland rule above: short, predictable _binary_trampoline_bin_*
-# symbol names.
-$(TRAMPOLINE_EMBED_OBJ): $(TRAMPOLINE_BIN)
-	cd $(TRAMPOLINE_OBJDIR) && $(OBJCOPY) -I binary -O elf32-i386 -B i386 trampoline.bin trampoline_embed.o
 
 # Pull in auto-generated header dependencies (silently ignored on first build
 # before any .d files exist).
@@ -235,13 +143,6 @@ run: $(OUTPUT_BIN)
 	@chmod +x tools/run-qemu.sh
 	@./tools/run-qemu.sh
 
-# Create the persistent data disk image if it doesn't already exist -
-# never overwritten once present, so fs/diskfs.c's on-disk data survives
-# across rebuilds (only `rm disk.img` starts it fresh).
-$(DISK_IMG):
-	@echo "Creating $(DISK_SIZE_MB) MiB persistent disk image: $(DISK_IMG)..."
-	@dd if=/dev/zero of=$(DISK_IMG) bs=1M count=$(DISK_SIZE_MB) status=none
-
 # Create bootable ISO
 iso: $(OUTPUT_BIN)
 	@echo "Creating bootable ISO image..."
@@ -249,7 +150,7 @@ iso: $(OUTPUT_BIN)
 	@./tools/create-iso.sh
 
 # Run ISO in QEMU
-run-iso: iso | $(DISK_IMG)
+run-iso: iso
 	@echo "Running OrgitoOS ISO in QEMU..."
 	@if command -v $(QEMU) &> /dev/null; then \
 		$(QEMU) $(QEMU_FLAGS); \
@@ -259,7 +160,7 @@ run-iso: iso | $(DISK_IMG)
 	fi
 
 # Debug: run in QEMU with GDB stub enabled, paused, serial output to terminal
-debug: iso | $(DISK_IMG)
+debug: iso
 	@echo "Starting OrgitoOS in QEMU with GDB server enabled (paused at startup)..."
 	@echo "  GDB server listening on tcp::1234"
 	@echo "  Attach with: make gdb  (in another terminal)"
@@ -284,7 +185,7 @@ gdb:
 	fi
 
 # Run in QEMU with logging enabled (output written to qemu.log)
-qemu-log: iso | $(DISK_IMG)
+qemu-log: iso
 	@echo "Starting OrgitoOS in QEMU with logging to qemu.log..."
 	@if command -v $(QEMU) &> /dev/null; then \
 		$(QEMU) $(QEMU_FLAGS) -serial mon:stdio -d int,cpu_reset,guest_errors -D qemu.log; \

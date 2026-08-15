@@ -34,9 +34,7 @@ char* strcpy(char* dest, const char* src);
 char* strncpy(char* dest, const char* src, size_t n);
 void* memcpy(void* dest, const void* src, size_t n);
 void* memset(void* ptr, int value, size_t num);
-int memcmp(const void* a, const void* b, size_t n);
 char* strchr(const char* str, int ch);
-char* strstr(const char* haystack, const char* needle);
 int strncmp(const char* str1, const char* str2, size_t n);
 
 /* Integer to ASCII conversion */

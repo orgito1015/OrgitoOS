@@ -209,8 +209,9 @@ All commands include comprehensive error handling for:
 3. Add permission system (read/write/execute)
 4. Add timestamps using the timer subsystem
 5. Implement symbolic links
-6. Add more filesystem commands (mkdir, rm, touch, etc.)
-7. Support for multiple filesystems (VFS abstraction layer)
+6. ~~Add more filesystem commands (mkdir, rm, touch, etc.)~~ — done (`kernel/commands.c`)
+7. Support for multiple filesystems (VFS abstraction layer) — e.g. an on-disk
+   filesystem backed by a real ATA/IDE disk driver, so files persist across reboots
 
 ## Code Quality
 

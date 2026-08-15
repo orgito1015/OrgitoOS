@@ -57,11 +57,5 @@ static inline int  u_wait(int *status)     { return _syscall1(SYS_WAIT, (uint32_
 static inline int  u_read(char *buf, uint32_t maxlen) {
     return _syscall2(SYS_READ, (uint32_t)buf, maxlen);
 }
-/* Loads and spawns the ELF32 binary at `path` as a new process (see
- * kernel/exec.c for why this is spawn-style, not in-place replacement).
- * Returns the new process's pid, or -1 on failure. */
-static inline int  u_exec(const char *path) {
-    return _syscall1(SYS_EXEC, (uint32_t)path);
-}
 
 #endif /* ORGITOOS_INCLUDE_USYSCALL_H */

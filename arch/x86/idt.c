@@ -42,7 +42,3 @@ void idt_init(void) {
     /* Load the IDT into the CPU */
     idt_load((uint32_t)&idtp);
 }
-
-void idt_reload(void) {
-    idt_load((uint32_t)&idtp);
-}

@@ -76,10 +76,4 @@ void gui_render_all(void);
 /* Clear screen */
 void gui_clear_screen(uint32_t color);
 
-/* Blit the simulated framebuffer above onto the real linear framebuffer
- * (drivers/framebuffer.c), if one is active - an opt-in presentation
- * step, not called automatically by any drawing primitive. No-op if no
- * real framebuffer is active (e.g. the VGA text backend is in use). */
-void gui_flip_to_screen(void);
-
 #endif /* ORGITOOS_INCLUDE_GUI_H */

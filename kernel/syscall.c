@@ -25,16 +25,13 @@
 #include "syscall.h"
 #include "kernel.h"
 #include "string.h"
-#include "exec.h"
 #include "../process/process.h"
-#include "../process/percpu.h"
 #include "../process/scheduler.h"
 #include "../memory/heap.h"
 #include "../memory/pmm.h"
 #include "../memory/vmm.h"
 #include "../drivers/console.h"
 #include "../drivers/keyboard.h"
-#include "../fs/vfs.h"
 #include "../arch/x86/idt.h"
 #include "../arch/x86/gdt.h"
 
@@ -56,7 +53,7 @@ void syscall_init(void) {
      */
     idt_set_gate(0x80, (uint32_t)int80_handler,
                  KERNEL_CODE_SEGMENT, IDT_FLAGS_USER);
-    console_write("Syscalls: int 0x80 gate installed (10 syscalls)\n");
+    console_write("Syscalls: int 0x80 gate installed (9 syscalls)\n");
 }
 
 /* ------------------------------------------------------------------ */
@@ -93,31 +90,6 @@ static int sys_read(char *buf, uint32_t maxlen) {
     if (!buf || maxlen == 0) return maxlen == 0 ? 0 : -1;
     keyboard_get_line(buf, maxlen);
     return (int)string_length(buf);
-}
-
-/* ------------------------------------------------------------------ */
-/* sys_exec                                                             */
-/* ------------------------------------------------------------------ */
-
-/*
- * The path pointer is a user-space address in the *calling* process's own
- * (currently active) address space - safe to read directly, but bounded,
- * same reasoning as sys_write's cap: a bad or unterminated pointer must
- * not run away past the copy buffer.
- */
-static int sys_exec(const char *user_path) {
-    if (!user_path) return -1;
-
-    char path[VFS_MAX_PATH_LENGTH];
-    int n = 0;
-    while (user_path[n] != '\0' && n < VFS_MAX_PATH_LENGTH - 1) {
-        path[n] = user_path[n];
-        n++;
-    }
-    path[n] = '\0';
-
-    process_t *p = process_exec(path, PRIORITY_NORMAL);
-    return p ? (int)p->pid : -1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -172,63 +144,7 @@ static int sys_fork(regs_t *parent_regs) {
                      (uint32_t)phys, PTE_PRESENT | PTE_WRITABLE | PTE_USER);
     }
 
-    /*
-     * Deep-copy an exec()'d ELF image (kernel/exec.c), if the parent has
-     * one. Same scratch-mapping technique as the user-stack copy above:
-     * the source read comes straight from the parent's own mapping (its
-     * directory is the one currently active in CR3, and vaddr is exactly
-     * where process_exec() mapped it), the destination write goes through
-     * FORK_SCRATCH_VIRT since the freshly allocated physical page isn't
-     * reachable anywhere until mapped. Unlike the ustack (fixed virtual
-     * address, same in every process), each exec_pages entry carries its
-     * own vaddr/flags (process_t.exec_pages) recorded by process_exec(),
-     * so the child's mapping matches the parent's exactly.
-     */
-    exec_page_t *child_exec_pages = 0;
-    uint32_t child_exec_page_count = 0;
-    if (parent->exec_pages && parent->exec_page_count > 0) {
-        child_exec_pages = (exec_page_t *)kmalloc(parent->exec_page_count * sizeof(exec_page_t));
-        if (!child_exec_pages) {
-            for (int j = 0; j < PROCESS_USTACK_PAGES; j++) pmm_free_page((void *)child_ustack_phys[j]);
-            vmm_destroy_directory(child_dir);
-            kfree(child_kstack);
-            return -1;
-        }
-
-        for (uint32_t i = 0; i < parent->exec_page_count; i++) {
-            void *phys = pmm_alloc_page();
-            if (!phys) {
-                for (uint32_t j = 0; j < child_exec_page_count; j++) {
-                    pmm_free_page((void *)child_exec_pages[j].phys);
-                }
-                kfree(child_exec_pages);
-                for (int j = 0; j < PROCESS_USTACK_PAGES; j++) pmm_free_page((void *)child_ustack_phys[j]);
-                vmm_destroy_directory(child_dir);
-                kfree(child_kstack);
-                return -1;
-            }
-
-            uint32_t src_vaddr = parent->exec_pages[i].vaddr;
-            uint32_t flags     = parent->exec_pages[i].flags;
-
-            vmm_map_page(parent->page_dir, (void *)FORK_SCRATCH_VIRT, (uint32_t)phys,
-                         PTE_PRESENT | PTE_WRITABLE);
-            uint8_t *src = (uint8_t *)src_vaddr;
-            uint8_t *dst = (uint8_t *)FORK_SCRATCH_VIRT;
-            for (uint32_t b = 0; b < PAGE_SIZE; b++) dst[b] = src[b];
-            vmm_unmap_page(parent->page_dir, (void *)FORK_SCRATCH_VIRT);
-
-            vmm_map_page(child_dir, (void *)src_vaddr, (uint32_t)phys, flags);
-
-            child_exec_pages[child_exec_page_count].vaddr = src_vaddr;
-            child_exec_pages[child_exec_page_count].phys  = (uint32_t)phys;
-            child_exec_pages[child_exec_page_count].flags = flags;
-            child_exec_page_count++;
-        }
-    }
-
     __asm__ __volatile__("cli");
-    spin_lock(&g_sched_lock);
 
     /* PCB */
     process_t *child = 0;
@@ -240,10 +156,7 @@ static int sys_fork(regs_t *parent_regs) {
         }
     }
     if (!child) {
-        spin_unlock(&g_sched_lock);
         __asm__ __volatile__("sti");
-        for (uint32_t i = 0; i < child_exec_page_count; i++) pmm_free_page((void *)child_exec_pages[i].phys);
-        kfree(child_exec_pages);
         for (int i = 0; i < PROCESS_USTACK_PAGES; i++) pmm_free_page((void *)child_ustack_phys[i]);
         vmm_destroy_directory(child_dir);
         kfree(child_kstack);
@@ -256,17 +169,6 @@ static int sys_fork(regs_t *parent_regs) {
     child->parent_waiting = 0;
     child->cpu_ticks      = 0;
     child->wait_ticks     = 0;
-
-    /*
-     * exec_pages is a heap pointer, not user-stack content - the shallow
-     * PCB copy above must not let both parent and child think they own
-     * it (double pmm_free_page()/kfree() on exit). Point the child at its
-     * own deep copy, built above, instead: freshly allocated physical
-     * pages already mapped into child_dir at the identical virtual
-     * addresses the parent used, with content already copied.
-     */
-    child->exec_pages      = child_exec_pages;
-    child->exec_page_count = child_exec_page_count;
 
     /* New pid: reuse process_by_pid-safe allocation via a scan. */
     {
@@ -319,7 +221,6 @@ static int sys_fork(regs_t *parent_regs) {
     child->state = PROCESS_STATE_READY;
     scheduler_enqueue(child);
 
-    spin_unlock(&g_sched_lock);
     __asm__ __volatile__("sti");
     return (int)child->pid;
 }
@@ -372,10 +273,6 @@ void syscall_dispatch(regs_t *r) {
 
         case SYS_READ:
             r->eax = (uint32_t)sys_read((char *)r->ebx, r->ecx);
-            break;
-
-        case SYS_EXEC:
-            r->eax = (uint32_t)sys_exec((const char *)r->ebx);
             break;
 
         default:

@@ -156,13 +156,13 @@ Now that you have OrgitoOS running:
 
 1. **Experiment:** Try typing commands in the shell
 2. **Learn:** Check out the documentation in `/docs`
-3. **Contribute:** Read [CONTRIBUTING.md](../CONTRIBUTING.md) to learn how to contribute
+3. **Contribute:** Read [CONTRIBUTING.md](../../CONTRIBUTING.md) to learn how to contribute
 4. **Explore:** Look at the kernel source code under `arch/`, `kernel/`, `memory/`, `drivers/`, `fs/`, and `process/`
 
 ## Need Help?
 
 - 📖 [VirtualBox Troubleshooting Guide](VIRTUALBOX_TROUBLESHOOTING.md)
-- 📖 [Main README](../README.md)
+- 📖 [Main README](../../README.md)
 - 🐛 [File an Issue](https://github.com/orgito1015/OrgitoOS/issues)
 
 Enjoy exploring OrgitoOS! 🎉

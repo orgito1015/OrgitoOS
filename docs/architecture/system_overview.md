@@ -1,5 +1,12 @@
 # OrgitoOS Architecture
 
+> **⚠️ Historical snapshot, not current state.** This document describes the
+> kernel as it existed very early on (pre-memory-management, pre-exceptions,
+> pre-timer, pre-process-management, pre-filesystem). All of those have since
+> been implemented — see [ARCHITECTURE.md](ARCHITECTURE.md) and
+> [../roadmap/roadmap.md](../roadmap/roadmap.md) for the current, accurate
+> picture. Kept here for its still-valid boot/PIC/interrupt-flow walkthrough.
+
 ## Overview
 
 OrgitoOS is a 32-bit x86 educational operating system kernel designed to demonstrate fundamental OS concepts. It runs in protected mode and provides a minimal but functional interrupt-driven system with keyboard support.
@@ -70,7 +77,7 @@ The 8259A PIC is configured as follows:
 
 This remapping avoids conflicts with CPU exceptions (0x00-0x1F).
 
-**IRQ Assignments:**
+**IRQ Assignments (at the time of writing — timer is implemented today):**
 - IRQ0 (0x20): Timer (not yet implemented)
 - IRQ1 (0x21): Keyboard (implemented)
 - IRQ2: Cascade (slave PIC connection)
@@ -144,26 +151,23 @@ A simple command prompt that:
 3. Echoes back the typed line
 4. Ready for command parsing (future enhancement)
 
-## Current Limitations
+## Limitations at the Time of Writing (now resolved — see below)
 
-- **No Memory Management**: No paging, no heap allocator
-- **No Process Management**: Single-threaded, no task switching
-- **No Exception Handlers**: CPU exceptions are not caught
-- **No Timer**: No periodic interrupts or time tracking
-- **No Filesystem**: No disk access
-- **No User Mode**: Everything runs at privilege level 0
+These were true when this document was written; none of them are true today.
 
-## Future Architecture Plans
+- ~~No Memory Management~~ — PMM + VMM (paging) + heap allocator all exist (`memory/`)
+- ~~No Process Management~~ — PCBs, round-robin scheduler, ring 3 exist (`process/`)
+- ~~No Exception Handlers~~ — all 32 x86 exceptions are handled (`arch/x86/exceptions.c`)
+- ~~No Timer~~ — PIT at 100 Hz drives scheduling (`drivers/timer.c`)
+- ~~No Filesystem~~ — in-memory VFS (ramfs) exists (`fs/vfs.c`), no disk/persistence yet
+- **User Mode**: ring 3 transitions work for the first syscall, but ring-3
+  execution has a known, unresolved crash bug — see
+  [../roadmap/roadmap.md](../roadmap/roadmap.md) Phase 5
 
-See [roadmap.md](roadmap.md) for planned enhancements:
+## Current Architecture Plans
 
-1. Exception handlers for page faults, GPF, etc.
-2. Timer interrupt and scheduling
-3. Physical memory management
-4. Virtual memory with paging
-5. Process abstraction and multitasking
-6. System calls for user-mode programs
-7. Basic filesystem support
+See [../roadmap/roadmap.md](../roadmap/roadmap.md) for the up-to-date, accurate
+status of every subsystem (what's done, what's stubbed, and known bugs).
 
 ## Building Blocks
 

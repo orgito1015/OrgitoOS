@@ -16,7 +16,6 @@
 #include "shell.h"
 #include "string.h"
 #include "user_programs.h"
-#include "exec.h"
 #include "../drivers/console.h"
 #include "../process/process.h"
 #include "../process/scheduler.h"
@@ -241,17 +240,6 @@ void cmd_psleep(int argc, char **argv) {
     console_write(" ms (other processes keep running)...\n");
     process_sleep(ms);
     console_write("Shell awake.\n");
-}
-
-void cmd_exec(int argc, char **argv) {
-    if (argc < 2) {
-        console_write("Usage: exec <path>\n");
-        console_write("  Loads a real ELF32 binary from the VFS and runs it in ring 3.\n");
-        console_write("  Try: exec /bin/hello\n");
-        return;
-    }
-    /* process_exec() prints its own diagnostics on failure. */
-    process_exec(argv[1], PRIORITY_NORMAL);
 }
 
 void cmd_sched(int argc, char **argv) {

@@ -1,5 +1,13 @@
 # OrgitoOS: Advanced Architecture Evolution Strategy
 
+> **⚠️ Historical wishlist, not current state.** Written when the kernel had
+> almost nothing implemented. Most of Section 1 (memory management, exceptions,
+> process management, scheduler, syscalls) has since been built — every
+> "Current State: no X" line below predates that work and is now false. For an
+> accurate, up-to-date picture of what's done vs. stubbed vs. known-buggy, see
+> [roadmap.md](roadmap.md) instead. Kept here for its still-useful design
+> proposals on the genuinely unstarted items (SMP, PAE/x86-64, ASLR, etc.).
+
 ## Executive Assessment
 
 You have a clean, minimal 32-bit x86 educational kernel. It's well-structured for learning, but lacks virtually all production-grade features. This analysis focuses on transforming it into a research/production-capable system.
