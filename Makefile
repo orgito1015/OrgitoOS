@@ -41,6 +41,7 @@ CFLAGS += -I./memory         # Include memory headers
 CFLAGS += -I./drivers        # Include driver headers
 CFLAGS += -I./fs             # Include filesystem headers
 CFLAGS += -I./process        # Include process management headers
+CFLAGS += -I./compiler       # Include OrgitoCompiler headers
 
 # Assembly flags (same as C flags for consistency)
 ASFLAGS = $(CFLAGS)
@@ -55,6 +56,7 @@ LDFLAGS += -nostdlib         # No standard library
 LDFLAGS += -static           # Static linking only
 LDFLAGS += -Wl,--nmagic      # Don't align data segments to page boundaries
 LDFLAGS += -Wl,-z,noexecstack  # Mark stack as non-executable
+LDFLAGS += -Wl,--build-id=none  # No .note.gnu.build-id (linker.ld discards it anyway; this avoids generating it in the first place)
 
 # Source directories
 ARCH_DIR = arch/x86
@@ -64,6 +66,7 @@ MEMORY_DIR = memory
 DRIVERS_DIR = drivers
 FS_DIR = fs
 PROCESS_DIR = process
+COMPILER_DIR = compiler
 
 # C sources (arch/x86/exceptions.S below shares a basename with
 # arch/x86/exceptions.c, so its object gets an explicit rule/name further
@@ -78,7 +81,10 @@ C_SOURCES = $(ARCH_DIR)/gdt.c $(ARCH_DIR)/idt.c $(ARCH_DIR)/pic.c $(ARCH_DIR)/ex
             $(MEMORY_DIR)/cache.c $(MEMORY_DIR)/bus.c \
             $(DRIVERS_DIR)/console.c $(DRIVERS_DIR)/serial.c $(DRIVERS_DIR)/keyboard.c $(DRIVERS_DIR)/timer.c \
             $(FS_DIR)/vfs.c \
-            $(PROCESS_DIR)/process.c $(PROCESS_DIR)/scheduler.c
+            $(PROCESS_DIR)/process.c $(PROCESS_DIR)/scheduler.c \
+            $(COMPILER_DIR)/oc_platform.c $(COMPILER_DIR)/lexer.c $(COMPILER_DIR)/ast.c \
+            $(COMPILER_DIR)/parser.c $(COMPILER_DIR)/codegen.c $(COMPILER_DIR)/vm.c \
+            $(COMPILER_DIR)/oc_run.c
 
 # Assembly sources (excluding exceptions.S, handled separately above)
 ASM_SOURCES = $(ARCH_DIR)/boot.S $(ARCH_DIR)/isr.S $(ARCH_DIR)/context.S $(ARCH_DIR)/syscall.S

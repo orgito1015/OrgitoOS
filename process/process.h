@@ -61,6 +61,13 @@ typedef struct process {
     char             name[PROCESS_NAME_LEN];
     process_state_t  state;
 
+    /* Which split-screen console pane (0=left, 1=right) this process's
+     * console_write()/console_put_char()/keyboard_get_line() calls target.
+     * Zero-initialized by alloc_pcb(), so every process defaults to the
+     * left pane unless explicitly set otherwise (see kernel.c's
+     * shell_task()). See drivers/console.c / drivers/keyboard.c. */
+    int              pane;
+
     /* Scheduling */
     uint8_t          priority;       /* 0 (high) .. 2 (low)             */
     uint8_t          base_priority;  /* Priority before aging boosts    */

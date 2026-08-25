@@ -18,7 +18,10 @@ void keyboard_init(void);
 /* Keyboard interrupt handler (called from ISR) */
 void keyboard_handler(void);
 
-/* Get a line of input (blocking) */
+/* Get a line of input (blocking). Targets the calling process's own pane
+ * (process_t.pane): if that pane doesn't currently have keyboard focus,
+ * this simply keeps blocking until the user switches focus to it (Tab)
+ * and types a line - see drivers/keyboard.c. */
 void keyboard_get_line(char* buffer, size_t max_len);
 
 #endif /* ORGITOOS_DRIVERS_KEYBOARD_H */

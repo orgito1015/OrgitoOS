@@ -10,17 +10,30 @@
 /* Maximum number of registered commands */
 #define MAX_COMMANDS 48
 
-/* Command registry */
+/* Command registry - one shared table for every shell instance/pane */
 static shell_command_t command_table[MAX_COMMANDS];
 static int command_count = 0;
+static int shell_initialized = 0;
 
 /*
- * Initialize the shell
- * Registers all built-in commands
+ * Initialize the shell: registers all built-in commands.
+ *
+ * Idempotent by design: with two split-screen shell instances
+ * (kernel/kernel.c launches one per pane), this must run exactly once
+ * against the single shared command_table - calling it twice would either
+ * race (two threads concurrently resetting/repopulating the same table)
+ * or just double-register everything. kmain() already calls this once
+ * before creating either shell process; this guard is the defensive
+ * second layer in case anything else ever calls it again.
  */
 void shell_init(void) {
+    if (shell_initialized) {
+        return;
+    }
+    shell_initialized = 1;
+
     command_count = 0;
-    
+
     /* Register built-in commands */
     commands_register_all();
 }

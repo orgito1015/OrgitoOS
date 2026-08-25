@@ -3,14 +3,26 @@
  */
 
 #include "keyboard.h"
+#include "console.h"
 #include "../arch/x86/pic.h"
 #include "../arch/x86/ports.h"
+#include "../process/process.h"
 #include <stdint.h>
 #include <stddef.h>
 
-/* External terminal functions from kernel.c */
-extern void terminal_put_char(char c);
-extern void terminal_backspace(void);
+/* Tab (scan code set 1) toggles which split-screen pane has keyboard
+ * focus, instead of being typed as a character - see keyboard_handler(). */
+#define SCANCODE_TAB 0x0F
+
+/* Dedicated arrow/navigation keys (as opposed to the numpad digits that
+ * share these same code values) are sent as a 0xE0 prefix byte followed by
+ * one of these "make" codes - see the extended_prefix handling below. */
+#define SCANCODE_EXTENDED 0xE0
+#define SCANCODE_HOME     0x47
+#define SCANCODE_LEFT     0x4B
+#define SCANCODE_END      0x4F
+#define SCANCODE_RIGHT    0x4D
+#define SCANCODE_DELETE   0x53
 
 /* US QWERTY scan code to ASCII translation table (Set 1) */
 static const char scancode_to_ascii[128] = {
@@ -84,11 +96,64 @@ static const char scancode_to_ascii_shift[128] = {
 static uint8_t shift_pressed = 0;
 static uint8_t caps_lock = 0;
 
-/* Input buffer */
+/* Which pane currently receives typed characters. Toggled by Tab. */
+static int focused_pane = CONSOLE_PANE_LEFT;
+
+/* One input line buffer per pane, so each split-screen shell has its own
+ * independent line in progress; only the focused pane's buffer is ever
+ * appended to by keyboard_handler(). input_buffer_len is the line's total
+ * length (previously the only "position" tracked, when the cursor could
+ * only ever be at the end); input_cursor is where edits happen, which may
+ * now be anywhere in [0, input_buffer_len] thanks to Left/Right/Home/End.
+ * line_start_row/col is the pane cursor position where this line began
+ * (captured once in keyboard_get_line(), right after the prompt was
+ * printed), used to compute where cursor offset N lands on screen. */
 #define INPUT_BUFFER_SIZE 256
-static char input_buffer[INPUT_BUFFER_SIZE];
-static volatile size_t input_buffer_pos = 0;
-static volatile uint8_t line_ready = 0;
+static char input_buffer[CONSOLE_PANE_COUNT][INPUT_BUFFER_SIZE];
+static volatile size_t input_buffer_len[CONSOLE_PANE_COUNT] = { 0 };
+static volatile size_t input_cursor[CONSOLE_PANE_COUNT] = { 0 };
+static size_t line_start_row[CONSOLE_PANE_COUNT] = { 0 };
+static size_t line_start_col[CONSOLE_PANE_COUNT] = { 0 };
+static volatile uint8_t line_ready[CONSOLE_PANE_COUNT] = { 0 };
+
+/* Move pane's on-screen cursor to reflect input_cursor[pane] characters
+ * past line_start_row/col[pane], wrapping at the pane's width exactly like
+ * pane_put_char() does. Doesn't handle the line wrapping past the bottom
+ * of the screen (which would require scrolling line_start itself) - a
+ * pre-existing limitation shared with plain backspace-at-row-0, not
+ * something this line editor introduces. */
+static void sync_cursor_display(int pane) {
+    int width = console_pane_width(pane);
+    size_t total = line_start_col[pane] + input_cursor[pane];
+    size_t row = line_start_row[pane] + total / (size_t)width;
+    size_t col = total % (size_t)width;
+    if (row >= VGA_HEIGHT) row = VGA_HEIGHT - 1;
+    console_pane_set_cursor(pane, row, col);
+}
+
+/* Redraw input_buffer[pane][from .. input_buffer_len-1] starting at the
+ * screen position for offset `from`, then erase `extra_clear` trailing
+ * cells (used when the line just got shorter, to wipe the old tail), and
+ * finally restore the screen cursor to input_cursor[pane]. Used after any
+ * mid-line insert/delete, since those shift every character after the
+ * edit point. */
+static void redraw_tail(int pane, size_t from, size_t extra_clear) {
+    int width = console_pane_width(pane);
+    size_t total = line_start_col[pane] + from;
+    size_t row = line_start_row[pane] + total / (size_t)width;
+    size_t col = total % (size_t)width;
+    if (row >= VGA_HEIGHT) row = VGA_HEIGHT - 1;
+    console_pane_set_cursor(pane, row, col);
+
+    for (size_t i = from; i < input_buffer_len[pane]; i++) {
+        console_pane_put_char(pane, input_buffer[pane][i]);
+    }
+    for (size_t i = 0; i < extra_clear; i++) {
+        console_pane_put_char(pane, ' ');
+    }
+
+    sync_cursor_display(pane);
+}
 
 /* Initialize keyboard */
 void keyboard_init(void) {
@@ -98,23 +163,87 @@ void keyboard_init(void) {
     outb(PIC1_DATA, mask);
 }
 
+/* Dedicated arrow/Home/End/Delete keys send 0xE0 as a prefix byte,
+ * followed by the actual code - normally as two separate IRQ1 interrupts.
+ * Some hypervisors' virtual keyboard controllers deliver those two bytes
+ * close enough together that the second IRQ1 edge can be missed (the PIC
+ * line doesn't have time to re-arm before this ISR returns), silently
+ * dropping the follow-up byte - this reportedly happens in VirtualBox
+ * even though QEMU's timing doesn't trigger it. Polling the status port
+ * for the second byte within the *same* interrupt sidesteps needing a
+ * second IRQ1 edge at all, so it works regardless of hypervisor timing. */
+static uint8_t keyboard_read_next_byte(void) {
+    for (int spins = 0; spins < 100000; spins++) {
+        if (inb(KEYBOARD_STATUS_PORT) & 0x01) {
+            return inb(KEYBOARD_DATA_PORT);
+        }
+    }
+    return 0; /* Second byte never showed up - treat as a no-op key. */
+}
+
 /* Keyboard interrupt handler */
 void keyboard_handler(void) {
     /* Read scan code from keyboard */
     uint8_t scancode = inb(KEYBOARD_DATA_PORT);
-    
+
+    if (scancode == SCANCODE_EXTENDED) {
+        scancode = keyboard_read_next_byte();
+
+        /* Only the make (press) codes matter for these keys - ignore the
+         * paired 0xE0 <code>|0x80 release byte that follows a press. */
+        if (!(scancode & 0x80)) {
+            int pane = focused_pane;
+            switch (scancode) {
+                case SCANCODE_LEFT:
+                    if (input_cursor[pane] > 0) { input_cursor[pane]--; sync_cursor_display(pane); }
+                    break;
+                case SCANCODE_RIGHT:
+                    if (input_cursor[pane] < input_buffer_len[pane]) { input_cursor[pane]++; sync_cursor_display(pane); }
+                    break;
+                case SCANCODE_HOME:
+                    input_cursor[pane] = 0;
+                    sync_cursor_display(pane);
+                    break;
+                case SCANCODE_END:
+                    input_cursor[pane] = input_buffer_len[pane];
+                    sync_cursor_display(pane);
+                    break;
+                case SCANCODE_DELETE: {
+                    /* Delete-forward: remove the character at the cursor
+                     * (not before it, like Backspace), shifting the tail
+                     * left and redrawing it. */
+                    size_t at = input_cursor[pane];
+                    if (at < input_buffer_len[pane]) {
+                        for (size_t i = at; i + 1 < input_buffer_len[pane]; i++) {
+                            input_buffer[pane][i] = input_buffer[pane][i + 1];
+                        }
+                        input_buffer_len[pane]--;
+                        redraw_tail(pane, at, 1);
+                    }
+                    break;
+                }
+                default:
+                    /* Unhandled extended key (e.g. numpad-adjacent codes,
+                     * PageUp/PageDown) - ignore. */
+                    break;
+            }
+        }
+        pic_send_eoi(1);
+        return;
+    }
+
     /* Check if it's a break code (key release) */
     if (scancode & 0x80) {
         /* Key released */
         scancode &= 0x7F;  /* Remove break bit */
-        
+
         /* Check for shift key release */
         if (scancode == 0x2A || scancode == 0x36) {
             shift_pressed = 0;
         }
     } else {
         /* Key pressed */
-        
+
         /* Check for shift key press */
         if (scancode == 0x2A || scancode == 0x36) {
             shift_pressed = 1;
@@ -123,79 +252,120 @@ void keyboard_handler(void) {
         else if (scancode == 0x3A) {
             caps_lock = !caps_lock;
         }
+        /* Tab switches which split-screen pane has keyboard focus,
+         * instead of being typed - the unfocused pane's shell just keeps
+         * blocking in keyboard_get_line() until focus comes back to it. */
+        else if (scancode == SCANCODE_TAB) {
+            focused_pane = (focused_pane == CONSOLE_PANE_LEFT)
+                          ? CONSOLE_PANE_RIGHT : CONSOLE_PANE_LEFT;
+            console_focus_pane(focused_pane);
+        }
         /* Regular key press */
         else {
             char ascii = 0;
-            
+
             /* Validate scancode to prevent out-of-bounds access */
             if (scancode >= 128) {
                 /* Invalid scancode, ignore */
                 pic_send_eoi(1);
                 return;
             }
-            
+
             /* Get ASCII character */
             if (shift_pressed) {
                 ascii = scancode_to_ascii_shift[scancode];
             } else {
                 ascii = scancode_to_ascii[scancode];
             }
-            
+
             /* Apply caps lock for letters (only when shift is not pressed) */
             if (caps_lock && !shift_pressed) {
                 if (ascii >= 'a' && ascii <= 'z') {
                     ascii -= 32;  /* Convert to uppercase */
                 }
             }
-            
-            /* Handle special keys */
+
+            /* Handle special keys - all state/echo below targets whichever
+             * pane currently has focus. */
             if (ascii == '\b') {
-                /* Backspace */
-                if (input_buffer_pos > 0) {
-                    input_buffer_pos--;
-                    terminal_backspace();
+                /* Backspace: delete the character *before* the cursor, not
+                 * necessarily the last character in the line - shift the
+                 * tail left one slot and redraw it. */
+                int pane = focused_pane;
+                if (input_cursor[pane] > 0) {
+                    for (size_t i = input_cursor[pane] - 1; i + 1 < input_buffer_len[pane]; i++) {
+                        input_buffer[pane][i] = input_buffer[pane][i + 1];
+                    }
+                    input_buffer_len[pane]--;
+                    input_cursor[pane]--;
+                    redraw_tail(pane, input_cursor[pane], 1);
                 }
             } else if (ascii == '\n') {
-                /* Enter */
-                terminal_put_char('\n');
-                input_buffer[input_buffer_pos] = '\0';
-                line_ready = 1;
+                /* Enter submits the whole line regardless of where the
+                 * cursor was left - move the screen cursor to the end of
+                 * the line first so the newline lands after all of it. */
+                int pane = focused_pane;
+                input_cursor[pane] = input_buffer_len[pane];
+                sync_cursor_display(pane);
+                console_pane_put_char(pane, '\n');
+                input_buffer[pane][input_buffer_len[pane]] = '\0';
+                line_ready[pane] = 1;
             } else if (ascii != 0) {
-                /* Regular character */
-                if (input_buffer_pos < INPUT_BUFFER_SIZE - 1) {
-                    input_buffer[input_buffer_pos++] = ascii;
-                    terminal_put_char(ascii);
+                /* Regular character: insert at the cursor, shifting
+                 * anything after it right, then redraw the (now one
+                 * longer) tail. */
+                int pane = focused_pane;
+                if (input_buffer_len[pane] < INPUT_BUFFER_SIZE - 1) {
+                    for (size_t i = input_buffer_len[pane]; i > input_cursor[pane]; i--) {
+                        input_buffer[pane][i] = input_buffer[pane][i - 1];
+                    }
+                    input_buffer[pane][input_cursor[pane]] = ascii;
+                    input_buffer_len[pane]++;
+                    input_cursor[pane]++;
+                    redraw_tail(pane, input_cursor[pane] - 1, 0);
                 }
             }
         }
     }
-    
+
     /* Send EOI to PIC */
     pic_send_eoi(1);
 }
 
-/* Get a line of input (blocking) */
+/* Get a line of input (blocking), targeting the calling process's own pane */
 void keyboard_get_line(char* buffer, size_t max_len) {
     /* Validate parameters */
     if (buffer == NULL || max_len == 0) {
         return;
     }
-    
-    /* Reset buffer - disable interrupts to prevent race condition */
+
+    process_t *p = process_current();
+    int pane = p ? p->pane : CONSOLE_PANE_LEFT;
+
+    /* Reset this pane's buffer - disable interrupts to prevent race
+     * condition with keyboard_handler(). Also capture where this line
+     * starts on screen (right after whatever prompt the caller already
+     * printed), so the line editor can compute cursor positions for
+     * Left/Right/Home/End relative to it. */
     __asm__ __volatile__("cli");
-    input_buffer_pos = 0;
-    line_ready = 0;
+    input_buffer_len[pane] = 0;
+    input_cursor[pane] = 0;
+    line_ready[pane] = 0;
+    console_pane_get_cursor(pane, &line_start_row[pane], &line_start_col[pane]);
     __asm__ __volatile__("sti");
-    
-    /* Wait for line to be ready (interrupts must be enabled) */
-    while (!line_ready) {
+
+    /* Wait for this pane's line to be ready (interrupts must be enabled).
+     * If `pane` doesn't currently have keyboard focus, keyboard_handler()
+     * never sets line_ready[pane], so this simply blocks until the user
+     * switches focus here (Tab) and types a line - by design. */
+    while (!line_ready[pane]) {
         __asm__ __volatile__("hlt");
     }
-    
+
     /* Copy to output buffer */
     size_t i;
-    for (i = 0; i < input_buffer_pos && i < max_len - 1; i++) {
-        buffer[i] = input_buffer[i];
+    for (i = 0; i < input_buffer_len[pane] && i < max_len - 1; i++) {
+        buffer[i] = input_buffer[pane][i];
     }
     buffer[i] = '\0';
 }

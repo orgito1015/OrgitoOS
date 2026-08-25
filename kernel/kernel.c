@@ -169,13 +169,26 @@ void kmain(struct multiboot_info *mboot) {
     console_write("Type 'help' for available commands.\n\n");
 
     /*
+     * Register shell commands once, before any shell process exists: two
+     * shell instances (one per split-screen pane, below) share a single
+     * command table, so this must not run twice - see shell_init()'s own
+     * idempotency guard for why.
+     */
+    shell_init();
+
+    /*
      * Launch the interactive shell as a proper high-priority process,
      * then start preemptive scheduling. kmain's own context (adopted
      * as PID 0 by process_init) becomes the idle process: it runs only
      * when nothing else is READY and simply halts until the next
      * interrupt.
+     *
+     * Two instances are launched, one per split-screen pane (drivers/
+     * console.h): each shell_task() claims its pane from the `arg` it's
+     * passed. Tab switches which pane has keyboard focus.
      */
-    process_create("shell", shell_task, 0, PRIORITY_HIGH);
+    process_create("shell-left", shell_task, (void*)CONSOLE_PANE_LEFT, PRIORITY_HIGH);
+    process_create("shell-right", shell_task, (void*)CONSOLE_PANE_RIGHT, PRIORITY_HIGH);
     scheduler_start();
 
     for (;;) {
@@ -183,11 +196,11 @@ void kmain(struct multiboot_info *mboot) {
     }
 }
 
-/* Interactive shell, running as its own process (see kmain). */
+/* Interactive shell, running as its own process (see kmain). One instance
+ * runs per split-screen pane; `arg` (CONSOLE_PANE_LEFT/CONSOLE_PANE_RIGHT)
+ * says which. */
 void shell_task(void *arg) {
-    (void)arg;
-
-    shell_init();
+    process_current()->pane = (int)(intptr_t)arg;
 
     char input[256];
     while (1) {

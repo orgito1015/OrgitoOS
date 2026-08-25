@@ -27,6 +27,8 @@ void cmd_write(int argc, char** argv);
 void cmd_rm(int argc, char** argv);
 void cmd_meminfo(int argc, char** argv);
 void cmd_reboot(int argc, char** argv);
+void cmd_color(int argc, char** argv);
+void cmd_occ(int argc, char** argv);
 
 /* New feature test commands */
 void cmd_test_ipc(int argc, char** argv);

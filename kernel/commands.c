@@ -17,6 +17,7 @@
 #include "../include/gui.h"
 #include "../include/network.h"
 #include "../include/script.h"
+#include "../compiler/oc_run.h"
 
 /* Forward declaration for accessing command table */
 const shell_command_t* shell_get_commands(int* count);
@@ -78,6 +79,8 @@ void commands_register_all(void) {
     shell_register_command("rm", "Remove a file or directory", cmd_rm);
     shell_register_command("meminfo", "Show physical and heap memory usage", cmd_meminfo);
     shell_register_command("reboot", "Reboot the system", cmd_reboot);
+    shell_register_command("color", "Change this pane's text/background color [color <fg> <bg>]", cmd_color);
+    shell_register_command("occ", "Compile and run an OrgitoCompiler (.oc) source file [occ <file>]", cmd_occ);
     
     /* New feature test commands */
     shell_register_command("test_ipc", "Test IPC mechanisms (pipes, message queues)", cmd_test_ipc);
@@ -995,6 +998,101 @@ void cmd_rm(int argc, char** argv) {
             console_write(": failed to remove\n");
         }
     }
+}
+
+/*
+ * Color command - change this pane's text/background color.
+ * Only affects the pane the calling shell instance belongs to
+ * (console_set_color() resolves the pane via process_current()->pane).
+ */
+static void print_color_names(void) {
+    console_write("  black  blue  green  cyan  red  magenta  brown\n");
+    console_write("  light_grey  dark_grey  light_blue  light_green  light_cyan\n");
+    console_write("  light_red  light_magenta  yellow  white\n");
+}
+
+void cmd_color(int argc, char** argv) {
+    if (argc == 2 && (string_compare(argv[1], "-h") == 0 || string_compare(argv[1], "--help") == 0)) {
+        console_write("Usage: color <fg> <bg>\n");
+        console_write("Valid color names:\n");
+        print_color_names();
+        return;
+    }
+
+    if (argc != 3) {
+        console_write("Usage: color <fg> <bg>\n");
+        console_write("Try 'color -h' for the list of valid color names.\n");
+        return;
+    }
+
+    int fg = console_parse_color_name(argv[1]);
+    if (fg < 0) {
+        console_write("color: unknown foreground color '");
+        console_write(argv[1]);
+        console_write("'\n");
+        print_color_names();
+        return;
+    }
+
+    int bg = console_parse_color_name(argv[2]);
+    if (bg < 0) {
+        console_write("color: unknown background color '");
+        console_write(argv[2]);
+        console_write("'\n");
+        print_color_names();
+        return;
+    }
+
+    console_set_color((uint8_t)fg, (uint8_t)bg);
+}
+
+/*
+ * occ command - compile and run an OrgitoCompiler (.oc) source file.
+ * Reads the file from the VFS the same way cmd_cat does, then hands the
+ * bytes to oc_compile_and_run() (compiler/oc_run.c), which never fails
+ * destructively - lexer/parser/codegen/VM errors are reported via
+ * console_write and this always returns to the prompt.
+ */
+void cmd_occ(int argc, char** argv) {
+    static uint8_t buffer[VFS_MAX_FILE_SIZE];
+
+    if (argc != 2 || string_compare(argv[1], "-h") == 0 || string_compare(argv[1], "--help") == 0) {
+        console_write("Usage: occ <file>\n");
+        console_write("Compile and run an OrgitoCompiler (.oc) source file.\n");
+        return;
+    }
+
+    vfs_node_t* file;
+    if (argv[1][0] == '/') {
+        file = vfs_resolve_path(argv[1]);
+    } else {
+        char abs_path[VFS_MAX_PATH_LENGTH];
+        build_absolute_path(argv[1], abs_path, VFS_MAX_PATH_LENGTH);
+        file = vfs_resolve_path(abs_path);
+    }
+
+    if (!file) {
+        console_write("occ: ");
+        console_write(argv[1]);
+        console_write(": No such file or directory\n");
+        return;
+    }
+    if (file->type != NODE_FILE) {
+        console_write("occ: ");
+        console_write(argv[1]);
+        console_write(": Is a directory\n");
+        return;
+    }
+
+    ssize_t bytes_read = vfs_read(file, 0, file->length, buffer);
+    if (bytes_read < 0) {
+        console_write("occ: ");
+        console_write(argv[1]);
+        console_write(": read error\n");
+        return;
+    }
+
+    oc_compile_and_run((const char*)buffer, (size_t)bytes_read);
 }
 
 /*

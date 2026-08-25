@@ -6,6 +6,21 @@
 /* Entry point symbol from boot.S */
 ENTRY(_start)
 
+/* Explicit program headers so .text/.rodata/.data+.bss land in separate
+ * PT_LOAD segments with distinct permissions (R+X / R / R+W) instead of
+ * the linker's default of collapsing same-region output sections into one
+ * segment - which, combined with --nmagic, produced a single RWX segment
+ * (harmless here since GRUB doesn't enforce ELF segment permissions and
+ * memory/vmm.c enforces the kernel's real W^X split later in software, but
+ * worth doing properly). FLAGS values are the standard ELF PT_LOAD bits:
+ * PF_X=1, PF_W=2, PF_R=4. */
+PHDRS
+{
+  text_phdr   PT_LOAD FLAGS(5); /* R+X */
+  rodata_phdr PT_LOAD FLAGS(4); /* R   */
+  data_phdr   PT_LOAD FLAGS(6); /* R+W */
+}
+
 SECTIONS
 {
   /* Load the kernel at 1 MiB (0x100000)
@@ -29,7 +44,7 @@ SECTIONS
     *(.multiboot)
     /* Then place all code sections */
     *(.text*)
-  }
+  } :text_phdr
 
   /* Read-only data section - contains string literals and const data
    * Aligned to 4 KiB for memory protection.
@@ -45,7 +60,7 @@ SECTIONS
   {
     rodata_start = .;
     *(.rodata*)
-  }
+  } :rodata_phdr
 
   /* Initialized data section - contains global/static variables
    * with initial values
@@ -53,7 +68,7 @@ SECTIONS
   .data ALIGN(4K) :
   {
     *(.data*)
-  }
+  } :data_phdr
 
   /* Uninitialized data section - contains global/static variables
    * without initial values (zeroed by bootloader)
@@ -63,7 +78,7 @@ SECTIONS
   {
     *(.bss*)
     *(COMMON)
-  }
+  } :data_phdr
 
   /* Physical end of the kernel image (exclusive). Everything in
    * [kernel_start, kernel_end) is the loaded kernel and must be
