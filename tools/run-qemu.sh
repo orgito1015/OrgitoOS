@@ -80,6 +80,10 @@ echo ""
 # Using ISO boot is more reliable than direct kernel boot
 # and works with all QEMU versions (including 7.0+)
 # -boot d specifies boot from CD-ROM first, avoiding disk read attempts
-qemu-system-i386 -cdrom "$ISO_FILE" -boot d
+# -display gtk,zoom-to-fit=on scales the emulated screen to fill the
+# window (native VGA text mode is a tiny fixed 720x400px), so maximizing
+# or resizing the QEMU window actually makes the display bigger instead
+# of leaving it pinned at native size.
+qemu-system-i386 -cdrom "$ISO_FILE" -boot d -display gtk,zoom-to-fit=on
 
 echo -e "${YELLOW}QEMU exited${NC}"

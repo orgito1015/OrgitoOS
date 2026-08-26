@@ -10,7 +10,11 @@ OUTPUT_BIN = $(OUTPUT_DIR)/$(TARGET).bin
 # QEMU settings
 QEMU     = qemu-system-i386
 ISO_FILE = orgitoos.iso
-QEMU_FLAGS = -cdrom $(ISO_FILE) -boot d
+# zoom-to-fit scales the emulated VGA screen to fill the QEMU window
+# instead of staying pinned at the tiny native 720x400 text-mode pixel
+# size, so maximizing/resizing the window actually makes the display
+# bigger.
+QEMU_FLAGS = -cdrom $(ISO_FILE) -boot d -display gtk,zoom-to-fit=on
 
 # Compiler selection: prefer cross-compiler, fallback to native gcc
 CC := $(shell command -v i686-elf-gcc 2> /dev/null || echo gcc)

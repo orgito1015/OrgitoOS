@@ -4,6 +4,7 @@
 
 #include "smp.h"
 #include "console.h"
+#include "serial.h"
 #include "string.h"
 
 /* Global SMP information */
@@ -61,8 +62,10 @@ static uint32_t detect_cpu_count(void) {
 /* Initialize SMP subsystem */
 void smp_init(void) {
     if (smp_initialized) return;
-    
-    console_write("SMP: Detecting CPUs...\n");
+
+    /* Boot-time status only - kept off the narrow split-pane screen, still
+     * visible via serial (see kernel/kernel.c's boot banner comment). */
+    serial_write("SMP: Detecting CPUs...\n");
     
     /* Initialize SMP structure */
     smp_system.cpu_count = detect_cpu_count();
@@ -81,11 +84,11 @@ void smp_init(void) {
     smp_system.cpus[0].state = CPU_STATE_ONLINE;
     
     /* Print detection results */
-    console_write("SMP: Detected ");
+    serial_write("SMP: Detected ");
     char buf[16];
     itoa(smp_system.cpu_count, buf, 10);
-    console_write(buf);
-    console_write(" CPU(s)\n");
+    serial_write(buf);
+    serial_write(" CPU(s)\n");
     
     smp_initialized = 1;
 }

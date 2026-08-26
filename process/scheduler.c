@@ -13,6 +13,7 @@
 #include "../memory/vmm.h"
 #include "../drivers/timer.h"
 #include "../drivers/console.h"
+#include "../drivers/serial.h"
 
 /* From arch/x86/context.S */
 extern void context_switch(uint32_t *old_esp, uint32_t new_esp);
@@ -138,7 +139,9 @@ static void wake_sleepers(uint64_t now) {
 
 void scheduler_start(void) {
     started = 1;
-    console_write("Scheduler: preemptive round-robin active (quantum 50 ms)\n");
+    /* Boot-time status only - kept off the narrow split-pane screen, still
+     * visible via serial (see kernel/kernel.c's boot banner comment). */
+    serial_write("Scheduler: preemptive round-robin active (quantum 50 ms)\n");
 }
 
 int scheduler_active(void) {

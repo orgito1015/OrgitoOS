@@ -4,6 +4,7 @@
 
 #include "network.h"
 #include "console.h"
+#include "serial.h"
 #include "string.h"
 
 /* Global network device */
@@ -17,8 +18,10 @@ static socket_t sockets[MAX_SOCKETS];
 /* Initialize networking subsystem */
 void net_init(void) {
     if (net_initialized) return;
-    
-    console_write("NET: Initializing networking stack...\n");
+
+    /* Boot-time status only - kept off the narrow split-pane screen, still
+     * visible via serial (see kernel/kernel.c's boot banner comment). */
+    serial_write("NET: Initializing networking stack...\n");
     
     /* Initialize network device */
     strncpy(net_dev.name, "eth0", sizeof(net_dev.name));
@@ -46,7 +49,7 @@ void net_init(void) {
     net_dev.is_up = 1;
     net_initialized = 1;
     
-    console_write("NET: eth0 up at 192.168.1.100\n");
+    serial_write("NET: eth0 up at 192.168.1.100\n");
 }
 
 /* Set IP address */

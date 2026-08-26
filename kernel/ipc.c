@@ -4,6 +4,7 @@
 
 #include "ipc.h"
 #include "console.h"
+#include "serial.h"
 #include "string.h"
 
 /* Static storage for pipes and message queues */
@@ -35,7 +36,9 @@ void ipc_init(void) {
     }
     
     ipc_initialized = 1;
-    console_write("IPC: Pipes and message queues initialized\n");
+    /* Boot-time status only - kept off the narrow split-pane screen, still
+     * visible via serial (see kernel/kernel.c's boot banner comment). */
+    serial_write("IPC: Pipes and message queues initialized\n");
 }
 
 /* Create a new pipe */

@@ -16,6 +16,7 @@
 #include "../drivers/keyboard.h"
 #include "../drivers/timer.h"
 #include "../drivers/console.h"
+#include "../drivers/serial.h"
 #include "../fs/vfs.h"
 #include "../include/ipc.h"
 #include "../include/smp.h"
@@ -43,56 +44,82 @@ void kernel_set_current_directory(vfs_node_t* dir) {
     }
 }
 
+/*
+ * Boot banner, printed once to screen before any process exists (so it
+ * always lands on the left pane - see drivers/console.c's current_pane()
+ * default). Every line is kept to at most 39 columns: a line that hits
+ * exactly the pane's 40-column width trips pane_put_char()'s own
+ * end-of-line auto-wrap *and* the explicit '\n' right after it, which
+ * would double up as a stray blank row.
+ */
+static void print_boot_banner(void) {
+    console_write("\n");
+    console_write("=======================================\n");
+    console_write("                OrgitoOS\n");
+    console_write("      Advanced Educational Kernel\n");
+    console_write("                 v0.1.0\n");
+    console_write("=======================================\n");
+    console_write("\n");
+}
+
 /* Kernel entry point called from boot.S */
 void kmain(struct multiboot_info *mboot) {
     /* Initialize console */
     console_init();
-    
-    console_write("OrgitoOS - Advanced Educational Kernel\n");
-    console_write("====================================\n");
-    console_write("Running in 32-bit protected mode.\n\n");
+
+    print_boot_banner();
+
+    /*
+     * Subsystem-by-subsystem init trace: kept off the (narrow, 40-column)
+     * screen so boot stays clean, but still written straight to the
+     * serial port so it's not lost - `make debug`/`make qemu-log` and
+     * `qemu-system-i386 ... -serial stdio` (see drivers/serial.h) still
+     * show the full step-by-step log for debugging.
+     */
+    serial_write("OrgitoOS - Advanced Educational Kernel\n");
+    serial_write("Running in 32-bit protected mode.\n\n");
 
     /* Install the kernel's own GDT + TSS (required for ring 3) */
-    console_write("[1/15] Installing GDT and TSS...\n");
+    serial_write("[1/15] Installing GDT and TSS...\n");
     gdt_init();
 
     /* Initialize IDT */
-    console_write("[2/15] Initializing IDT...\n");
+    serial_write("[2/15] Initializing IDT...\n");
     idt_init();
-    
+
     /* Install exception handlers */
-    console_write("[3/15] Installing exception handlers...\n");
+    serial_write("[3/15] Installing exception handlers...\n");
     exceptions_init();
-    
+
     /* Initialize PIC */
-    console_write("[4/15] Initializing PIC...\n");
+    serial_write("[4/15] Initializing PIC...\n");
     pic_init();
-    
+
     /* Initialize timer (100 Hz) */
-    console_write("[5/15] Initializing timer...\n");
+    serial_write("[5/15] Initializing timer...\n");
     timer_init(100);
-    
+
     /* Install timer interrupt handler (IRQ0 = interrupt 0x20) */
     idt_set_gate(0x20, (uint32_t)irq0_handler, KERNEL_CODE_SEGMENT, IDT_FLAGS_KERNEL);
-    
+
     /* Install keyboard interrupt handler (IRQ1 = interrupt 0x21) */
-    console_write("[6/15] Initializing keyboard...\n");
+    serial_write("[6/15] Initializing keyboard...\n");
     idt_set_gate(0x21, (uint32_t)irq1_handler, KERNEL_CODE_SEGMENT, IDT_FLAGS_KERNEL);
-    
+
     /* Initialize keyboard (this will unmask IRQ1) */
     keyboard_init();
-    
+
     /* Initialize VFS */
-    console_write("[7/15] Initializing filesystem...\n");
+    serial_write("[7/15] Initializing filesystem...\n");
     vfs_init();
     current_directory = vfs_get_root();
-    
+
     /* Initialize physical memory manager */
-    console_write("[8/15] Initializing physical memory manager...\n");
+    serial_write("[8/15] Initializing physical memory manager...\n");
     pmm_init(mboot);
 
     /* Initialize virtual memory manager */
-    console_write("[9/15] Initializing virtual memory manager...\n");
+    serial_write("[9/15] Initializing virtual memory manager...\n");
     vmm_init();
 
     /*
@@ -126,47 +153,50 @@ void kmain(struct multiboot_info *mboot) {
     }
 
     /* Initialize IPC mechanisms */
-    console_write("[10/15] Initializing IPC (pipes, message queues)...\n");
+    serial_write("[10/15] Initializing IPC (pipes, message queues)...\n");
     ipc_init();
-    
+
     /* Initialize SMP support */
-    console_write("[11/15] Initializing multi-core SMP...\n");
+    serial_write("[11/15] Initializing multi-core SMP...\n");
     smp_init();
-    
+
     /* Initialize GUI/Windowing system */
-    console_write("[12/15] Initializing GUI framework...\n");
+    serial_write("[12/15] Initializing GUI framework...\n");
     gui_init();
-    
+
     /* Initialize Networking stack */
-    console_write("[13/15] Initializing networking stack...\n");
+    serial_write("[13/15] Initializing networking stack...\n");
     net_init();
-    
+
     /* Initialize Shell scripting */
-    console_write("[14/15] Initializing shell scripting...\n");
+    serial_write("[14/15] Initializing shell scripting...\n");
     script_init();
 
     /* Initialize process management and system calls */
-    console_write("[15/15] Initializing processes, scheduler, syscalls...\n");
+    serial_write("[15/15] Initializing processes, scheduler, syscalls...\n");
     process_init();
     syscall_init();
 
     /* Enable interrupts */
     __asm__ __volatile__("sti");
-    
+
     /* Now that interrupts are enabled, unmask the timer IRQ */
     pic_unmask_irq(0);
-    
-    console_write("\n*** System Ready ***\n");
-    console_write("- Exception handling: Active\n");
-    console_write("- Timer interrupts: 100 Hz (preemptive, 50 ms quantum)\n");
-    console_write("- Keyboard: Ready\n");
-    console_write("- Filesystem: Ready\n");
-    console_write("- Processes: Multilevel round-robin scheduler\n");
-    console_write("- Syscalls: int 0x80 (exit/write/getpid/fork/...)\n");
-    console_write("- User mode: Ring 3 execution via TSS\n");
-    console_write("- IPC: Pipes and message queues available\n");
-    console_write("- Network: TCP/IP stack initialized\n\n");
-    console_write("Type 'help' for available commands.\n\n");
+
+    /* Full readiness detail goes to serial only (see the trace above);
+     * the screen just gets a short, calm ready line. */
+    serial_write("\n*** System Ready ***\n");
+    serial_write("- Exception handling: Active\n");
+    serial_write("- Timer interrupts: 100 Hz (preemptive, 50 ms quantum)\n");
+    serial_write("- Keyboard: Ready\n");
+    serial_write("- Filesystem: Ready\n");
+    serial_write("- Processes: Multilevel round-robin scheduler\n");
+    serial_write("- Syscalls: int 0x80 (exit/write/getpid/fork/...)\n");
+    serial_write("- User mode: Ring 3 execution via TSS\n");
+    serial_write("- IPC: Pipes and message queues available\n");
+    serial_write("- Network: TCP/IP stack initialized\n\n");
+
+    console_write("System ready. Type 'help' for commands.\n\n");
 
     /*
      * Register shell commands once, before any shell process exists: two

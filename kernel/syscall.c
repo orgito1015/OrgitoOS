@@ -31,6 +31,7 @@
 #include "../memory/pmm.h"
 #include "../memory/vmm.h"
 #include "../drivers/console.h"
+#include "../drivers/serial.h"
 #include "../drivers/keyboard.h"
 #include "../arch/x86/idt.h"
 #include "../arch/x86/gdt.h"
@@ -53,7 +54,9 @@ void syscall_init(void) {
      */
     idt_set_gate(0x80, (uint32_t)int80_handler,
                  KERNEL_CODE_SEGMENT, IDT_FLAGS_USER);
-    console_write("Syscalls: int 0x80 gate installed (9 syscalls)\n");
+    /* Boot-time status only - kept off the narrow split-pane screen, still
+     * visible via serial (see kernel/kernel.c's boot banner comment). */
+    serial_write("Syscalls: int 0x80 gate installed (9 syscalls)\n");
 }
 
 /* ------------------------------------------------------------------ */

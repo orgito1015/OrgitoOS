@@ -4,6 +4,7 @@
 
 #include "script.h"
 #include "console.h"
+#include "serial.h"
 #include "string.h"
 #include "ipc.h"
 
@@ -14,8 +15,10 @@ static int script_initialized = 0;
 /* Initialize scripting subsystem */
 void script_init(void) {
     if (script_initialized) return;
-    
-    console_write("SCRIPT: Initializing shell scripting...\n");
+
+    /* Boot-time status only - kept off the narrow split-pane screen, still
+     * visible via serial (see kernel/kernel.c's boot banner comment). */
+    serial_write("SCRIPT: Initializing shell scripting...\n");
     
     /* Initialize all variables */
     for (int i = 0; i < MAX_VARIABLES; i++) {
@@ -34,7 +37,7 @@ void script_init(void) {
     script_set_var("PS1", "OrgitoOS> ");
     
     script_initialized = 1;
-    console_write("SCRIPT: Shell scripting enabled\n");
+    serial_write("SCRIPT: Shell scripting enabled\n");
 }
 
 /* Set a variable */

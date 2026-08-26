@@ -4,6 +4,7 @@
 
 #include "gui.h"
 #include "console.h"
+#include "serial.h"
 #include "string.h"
 #include "../memory/heap.h"
 
@@ -16,20 +17,22 @@ static uint32_t framebuffer_data[GUI_WIDTH * GUI_HEIGHT];
 /* Initialize GUI subsystem */
 void gui_init(void) {
     if (gui.initialized) return;
-    
-    console_write("GUI: Initializing windowing system...\n");
-    
+
+    /* Boot-time status only - kept off the narrow split-pane screen, still
+     * visible via serial (see kernel/kernel.c's boot banner comment). */
+    serial_write("GUI: Initializing windowing system...\n");
+
     gui.framebuffer = framebuffer_data;
     gui.width = GUI_WIDTH;
     gui.height = GUI_HEIGHT;
     gui.window_list = NULL;
     gui.next_window_id = 1;
     gui.initialized = 1;
-    
+
     /* Clear screen to black */
     gui_clear_screen(COLOR_BLACK);
-    
-    console_write("GUI: 800x600x32 framebuffer initialized\n");
+
+    serial_write("GUI: 800x600x32 framebuffer initialized\n");
 }
 
 /* Draw a single pixel */

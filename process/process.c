@@ -29,6 +29,7 @@
 #include "../memory/pmm.h"
 #include "../memory/vmm.h"
 #include "../drivers/console.h"
+#include "../drivers/serial.h"
 #include "../drivers/timer.h"
 #include "../arch/x86/gdt.h"
 #include "../kernel/string.h"
@@ -105,7 +106,9 @@ void process_init(void) {
 
     current_process = idle;
 
-    console_write("Process: table initialized (64 slots), PID 0 = idle\n");
+    /* Boot-time status only - kept off the narrow split-pane screen, still
+     * visible via serial (see kernel/kernel.c's boot banner comment). */
+    serial_write("Process: table initialized (64 slots), PID 0 = idle\n");
 }
 
 /* ------------------------------------------------------------------ */
