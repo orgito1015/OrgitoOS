@@ -18,6 +18,7 @@
 #include "../include/network.h"
 #include "../include/script.h"
 #include "../compiler/oc_run.h"
+#include "fileio.h"
 
 /* Forward declaration for accessing command table */
 const shell_command_t* shell_get_commands(int* count);
@@ -80,6 +81,7 @@ void commands_register_all(void) {
     shell_register_command("meminfo", "Show physical and heap memory usage", cmd_meminfo);
     shell_register_command("reboot", "Reboot the system", cmd_reboot);
     shell_register_command("color", "Change this pane's text/background color [color <fg> <bg>]", cmd_color);
+    posix_commands_register();
     shell_register_command("occ", "Compile and run an OrgitoCompiler (.oc) source file [occ <file>]", cmd_occ);
     
     /* New feature test commands */
@@ -159,9 +161,17 @@ void cmd_echo(int argc, char** argv) {
  * Uname command - Display OS name and version
  */
 void cmd_uname(int argc, char** argv) {
-    (void)argc;  /* Unused parameter */
-    (void)argv;  /* Unused parameter */
-    
+    /* uname -r : kernel release only (like Linux) */
+    if (argc >= 2 && string_compare(argv[1], "-r") == 0) {
+        console_write(ORGITOOS_KERNEL_RELEASE "\n");
+        return;
+    }
+    /* uname -a : one-line summary */
+    if (argc >= 2 && string_compare(argv[1], "-a") == 0) {
+        console_write("OrgitoOS orgito " ORGITOOS_KERNEL_RELEASE " i386\n");
+        return;
+    }
+
     console_write("OrgitoOS version 0.1.0\n");
     console_write("Architecture: i386 (32-bit x86)\n");
     console_write("Kernel: Educational Operating System\n");
@@ -703,6 +713,29 @@ void cmd_stat(int argc, char** argv) {
     console_write(" Inode: ");
     print_number(node->inode);
     console_put_char('\n');
+
+    /* Access: (0644/-rw-r--r--) */
+    {
+        uint32_t m = fileio_node_mode(node);
+        char perm[11];
+        const char *rwx = "rwxrwxrwx";
+        perm[0] = node->type == NODE_DIRECTORY ? 'd' : '-';
+        for (int b = 0; b < 9; b++) {
+            perm[1 + b] = (m & (0400u >> b)) ? rwx[b] : '-';
+        }
+        perm[10] = '\0';
+        char oct[5];
+        oct[0] = '0';
+        oct[1] = (char)('0' + ((m >> 6) & 7));
+        oct[2] = (char)('0' + ((m >> 3) & 7));
+        oct[3] = (char)('0' + (m & 7));
+        oct[4] = '\0';
+        console_write(" Access: (");
+        console_write(oct);
+        console_write("/");
+        console_write(perm);
+        console_write(")\n");
+    }
 }
 
 /*

@@ -79,6 +79,13 @@ See [docs/architecture/ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md) for d
 - ⚠️ **Shell process commands** - `ps`, `kill`, `spawn`, `sched`, `psleep` work; `forktest`, `user`, `counters`, `uecho` launch a ring-3 process but currently crash it (see above) (`kernel/proc_commands.c`)
 - ✅ **`read()` syscall** - ring 3 processes can now read a line of keyboard input via `int 0x80` (`kernel/syscall.c`, `include/usyscall.h`), demoed by the `uecho` shell command
 
+### POSIX File I/O & strace (✅ Complete)
+- ✅ **`open`/`read`/`write`/`close` syscalls** - per-process file descriptor tables (0/1/2 = stdin/stdout/stderr, first file gets fd 3), Linux errno values, atomic `O_CREAT|O_EXCL`, partial writes at the 4 KiB VFS file cap (`kernel/fileio.c`)
+- ✅ **`strace`** - traces `openat/read/write/close` made through `int 0x80`, in strace's own output format, with `-o file` and `-e trace=...`
+- ✅ **`FileCopy`** - `userland/FileCopy.c`, a portable POSIX program that builds unchanged for OrgitoOS and Linux
+- ✅ **Shell additions** - `chmod`, `cmp`, `whoami`, `layout full|split`, `uname -r`, `cmd1 && cmd2`
+- 📄 Course assignment write-up (Albanian): [docs/assignments/detyre1](docs/assignments/detyre1/README.md)
+
 ### Phase 2 - Address Space Isolation & Further Hardening (In Progress)
 - ✅ **Per-process page directories** with private, non-shared physical user stacks
 - ✅ **Kernel/user memory protection** - the identity map is supervisor-only by

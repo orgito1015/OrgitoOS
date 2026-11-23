@@ -7,6 +7,13 @@
 #ifndef ORGITOOS_KERNEL_COMMANDS_H
 #define ORGITOOS_KERNEL_COMMANDS_H
 
+/* Kernel release string reported by `uname -r` */
+#define ORGITOOS_KERNEL_RELEASE "0.1.0-orgitoos-i386"
+
+/* POSIX file-I/O commands: FileCopy, strace, chmod, cmp, whoami, layout
+ * (kernel/posix_commands.c) */
+void posix_commands_register(void);
+
 /* Register all built-in commands */
 void commands_register_all(void);
 

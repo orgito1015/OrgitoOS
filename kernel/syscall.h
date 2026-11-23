@@ -24,7 +24,13 @@
 #define SYS_GETPPID  6   /* getppid()                    */
 #define SYS_WAIT     7   /* wait(&status) -> child pid   */
 #define SYS_READ     8   /* read(buf, maxlen) -> chars read */
-#define SYS_MAX      9
+/* POSIX-style file I/O (kernel/fileio.c). Results are >= 0 on success or
+ * -errno on failure; include/ulibc.h maps that to "-1 and errno". */
+#define SYS_OPEN     9   /* open(path, flags, mode) -> fd      */
+#define SYS_CLOSE    10  /* close(fd) -> 0                     */
+#define SYS_FDREAD   11  /* read(fd, buf, count) -> bytes      */
+#define SYS_FDWRITE  12  /* write(fd, buf, count) -> bytes     */
+#define SYS_MAX      13
 
 /*
  * Register frame pushed by int80_handler, lowest address first:

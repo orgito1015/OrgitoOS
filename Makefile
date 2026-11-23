@@ -80,6 +80,7 @@ C_SOURCES = $(ARCH_DIR)/gdt.c $(ARCH_DIR)/idt.c $(ARCH_DIR)/pic.c $(ARCH_DIR)/ex
             $(KERNEL_DIR)/proc_commands.c $(KERNEL_DIR)/panic.c $(KERNEL_DIR)/string.c \
             $(KERNEL_DIR)/shell.c $(KERNEL_DIR)/commands.c $(KERNEL_DIR)/ipc.c \
             $(KERNEL_DIR)/smp.c $(KERNEL_DIR)/gui.c $(KERNEL_DIR)/network.c $(KERNEL_DIR)/script.c \
+            $(KERNEL_DIR)/fileio.c $(KERNEL_DIR)/posix_commands.c $(KERNEL_DIR)/ulibc.c \
             $(CPU_DIR)/pipeline.c $(CPU_DIR)/single_cycle.c $(CPU_DIR)/performance.c \
             $(MEMORY_DIR)/pmm.c $(MEMORY_DIR)/vmm.c $(MEMORY_DIR)/heap.c \
             $(MEMORY_DIR)/cache.c $(MEMORY_DIR)/bus.c \
@@ -98,7 +99,15 @@ C_OBJS   = $(patsubst %.c,$(OBJDIR)/%.o,$(C_SOURCES))
 ASM_OBJS = $(patsubst %.S,$(OBJDIR)/%.o,$(ASM_SOURCES))
 EXCEPTIONS_ASM_OBJ = $(OBJDIR)/$(ARCH_DIR)/exceptions_asm.o
 
-OBJS = $(C_OBJS) $(ASM_OBJS) $(EXCEPTIONS_ASM_OBJ)
+# Userland programs written against the POSIX API (include/ulibc.h) and
+# linked into the kernel image as shell commands. They are compiled as
+# strict C99 with -D__ORGITOOS__ so the very same source also builds on
+# Linux with `gcc -std=c99 -Wall -Wextra FileCopy.c -o FileCopy`.
+USERLAND_DIR = userland
+FILECOPY_OBJ = $(OBJDIR)/$(USERLAND_DIR)/FileCopy.o
+USERLAND_CFLAGS = $(filter-out -std=gnu99,$(CFLAGS)) -std=c99 -D__ORGITOOS__ -Dmain=filecopy_main
+
+OBJS = $(C_OBJS) $(ASM_OBJS) $(EXCEPTIONS_ASM_OBJ) $(FILECOPY_OBJ)
 
 # Default target: build the kernel
 all: $(OUTPUT_BIN)
@@ -112,6 +121,10 @@ $(OBJDIR)/%.o: %.c
 $(OBJDIR)/%.o: %.S
 	@mkdir -p $(dir $@)
 	$(CC) $(ASFLAGS) $(DEPFLAGS) -c $< -o $@
+
+$(FILECOPY_OBJ): $(USERLAND_DIR)/FileCopy.c
+	@mkdir -p $(dir $@)
+	$(CC) $(USERLAND_CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 # arch/x86/exceptions.S shares a basename with arch/x86/exceptions.c, so it
 # needs an explicit rule to avoid colliding with that object's pattern match.

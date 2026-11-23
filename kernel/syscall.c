@@ -35,6 +35,7 @@
 #include "../drivers/keyboard.h"
 #include "../arch/x86/idt.h"
 #include "../arch/x86/gdt.h"
+#include "fileio.h"
 
 /* Scratch virtual address used to briefly map a freshly-allocated child
  * stack page into the parent's own (currently active) address space so it
@@ -56,7 +57,7 @@ void syscall_init(void) {
                  KERNEL_CODE_SEGMENT, IDT_FLAGS_USER);
     /* Boot-time status only - kept off the narrow split-pane screen, still
      * visible via serial (see kernel/kernel.c's boot banner comment). */
-    serial_write("Syscalls: int 0x80 gate installed (9 syscalls)\n");
+    serial_write("Syscalls: int 0x80 gate installed (13 syscalls)\n");
 }
 
 /* ------------------------------------------------------------------ */
@@ -277,6 +278,35 @@ void syscall_dispatch(regs_t *r) {
         case SYS_READ:
             r->eax = (uint32_t)sys_read((char *)r->ebx, r->ecx);
             break;
+
+        /* ---- POSIX file I/O, traced by `strace` ---- */
+        case SYS_OPEN: {
+            int ret = fileio_open((const char *)r->ebx, (int)r->ecx, r->edx);
+            fileio_trace_open((const char *)r->ebx, (int)r->ecx, r->edx, ret);
+            r->eax = (uint32_t)ret;
+            break;
+        }
+
+        case SYS_CLOSE: {
+            int ret = fileio_close((int)r->ebx);
+            fileio_trace_close((int)r->ebx, ret);
+            r->eax = (uint32_t)ret;
+            break;
+        }
+
+        case SYS_FDREAD: {
+            int ret = fileio_read((int)r->ebx, (void *)r->ecx, r->edx);
+            fileio_trace_rw(0, (int)r->ebx, (const void *)r->ecx, r->edx, ret);
+            r->eax = (uint32_t)ret;
+            break;
+        }
+
+        case SYS_FDWRITE: {
+            int ret = fileio_write((int)r->ebx, (const void *)r->ecx, r->edx);
+            fileio_trace_rw(1, (int)r->ebx, (const void *)r->ecx, r->edx, ret);
+            r->eax = (uint32_t)ret;
+            break;
+        }
 
         default:
             r->eax = (uint32_t)-1;

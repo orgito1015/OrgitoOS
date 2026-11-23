@@ -24,6 +24,7 @@
  */
 
 #include "process.h"
+#include "../kernel/fileio.h"
 #include "scheduler.h"
 #include "../memory/heap.h"
 #include "../memory/pmm.h"
@@ -308,6 +309,9 @@ void process_exit(int code) {
 
     self->exit_code = code;
     self->state     = PROCESS_STATE_ZOMBIE;
+
+    /* Release any files the process left open (like a Unix exit()). */
+    fileio_close_all(self);
 
     /* User stack can be freed now; the kernel stack is still in use
      * until we have switched away, so the reaper frees it later. */

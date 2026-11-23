@@ -360,9 +360,12 @@ void keyboard_handler(void) {
          * instead of being typed - the unfocused pane's shell just keeps
          * blocking in keyboard_get_line() until focus comes back to it. */
         else if (scancode == SCANCODE_TAB) {
-            focused_pane = (focused_pane == CONSOLE_PANE_LEFT)
-                          ? CONSOLE_PANE_RIGHT : CONSOLE_PANE_LEFT;
-            console_focus_pane(focused_pane);
+            /* In full-width layout there is only one visible pane. */
+            if (!console_is_fullscreen()) {
+                focused_pane = (focused_pane == CONSOLE_PANE_LEFT)
+                              ? CONSOLE_PANE_RIGHT : CONSOLE_PANE_LEFT;
+                console_focus_pane(focused_pane);
+            }
         }
         /* Regular key press */
         else {

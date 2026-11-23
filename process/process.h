@@ -54,6 +54,9 @@ typedef enum {
 /* Process entry point type (kernel threads) */
 typedef void (*process_entry_t)(void *arg);
 
+/* Per-process file descriptor table size */
+#define PROCESS_MAX_FDS 16
+
 /* Process control block */
 typedef struct process {
     uint32_t         pid;
@@ -96,6 +99,18 @@ typedef struct process {
                                        * mapped only in this process's own
                                        * page_dir. Zero entries are unused
                                        * (kernel threads never populate this). */
+
+    /* POSIX-style file descriptors (kernel/fileio.c). Each entry is an
+     * index+1 into the global open-file table, 0 = unused. Descriptors
+     * 0, 1 and 2 are always stdin (keyboard), stdout and stderr (console),
+     * so the first open() returns 3, exactly as on Linux. */
+    int16_t          fd_table[PROCESS_MAX_FDS];
+
+    /* System-call tracing (the `strace` shell command). trace_mask is a
+     * bitmask of FILEIO_TRACE_* classes; trace_out is the VFS node the
+     * trace is appended to, or NULL to print it on the console. */
+    uint32_t         trace_mask;
+    void            *trace_out;
 
     /* Sleep / exit bookkeeping */
     uint64_t         sleep_until;    /* Wake tick when SLEEPING          */

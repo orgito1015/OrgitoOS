@@ -70,10 +70,56 @@ static int parse_command(char* input, char** argv, int max_args) {
     return argc;
 }
 
+/* Exit status of the most recent command (see shell.h) */
+static int last_status = 0;
+
+void shell_set_status(int status) { last_status = status; }
+int  shell_get_status(void)       { return last_status; }
+
+const shell_command_t* shell_find_command(const char* name) {
+    if (name[0] == '.' && name[1] == '/') {
+        name += 2;     /* "./FileCopy" -> "FileCopy" */
+    }
+    for (int i = 0; i < command_count; i++) {
+        if (string_compare(name, command_table[i].name) == 0) {
+            return &command_table[i];
+        }
+    }
+    return 0;
+}
+
+static void shell_execute_one(char* input);
+
 /*
- * Execute a command string
+ * Execute a command line. Supports "cmd1 && cmd2 && ...": each command
+ * runs only if the previous one exited with status 0.
  */
 void shell_execute(char* input) {
+    if (input == 0) {
+        return;
+    }
+    char* seg = input;
+    for (;;) {
+        char* amp = 0;
+        for (char* p = seg; *p; p++) {
+            if (p[0] == '&' && p[1] == '&') { amp = p; break; }
+        }
+        if (amp) {
+            amp[0] = '\0';
+        }
+        shell_execute_one(seg);
+        if (!amp || last_status != 0) {
+            return;
+        }
+        seg = amp + 2;
+    }
+}
+
+/*
+ * Execute a single command (no && chaining)
+ */
+static void shell_execute_one(char* input) {
+    last_status = 0;
     /* Skip empty input */
     if (input == 0 || *input == '\0') {
         return;
@@ -102,15 +148,14 @@ void shell_execute(char* input) {
     
     /* Look up the command in the command table */
     const char* cmd_name = argv[0];
-    for (int i = 0; i < command_count; i++) {
-        if (string_compare(cmd_name, command_table[i].name) == 0) {
-            /* Found the command, execute it */
-            command_table[i].handler(argc, argv);
-            return;
-        }
+    const shell_command_t* cmd = shell_find_command(cmd_name);
+    if (cmd) {
+        cmd->handler(argc, argv);
+        return;
     }
-    
+
     /* Command not found */
+    last_status = 127;
     console_write("Command not found: ");
     console_write(cmd_name);
     console_write("\n");
