@@ -11,8 +11,8 @@
 - Kernel heap allocator (`kmalloc`/`kfree`, first-fit free list)
 - Process management: PCBs, multilevel round-robin scheduler with aging, ring 3 user
   mode via GDT/TSS, `int 0x80` syscalls (`exit`/`write`/`getpid`/`fork`/`yield`/`sleep`/
-  `getppid`/`wait`) — **except that ring-3 execution itself has an unresolved crash bug,
-  see Phase 5 below**
+  `getppid`/`wait`) — ring-3 programs run correctly since paging is actually enabled
+  (see Phase 5 below)
 - In-memory VFS (ramfs) with directories, files, and coreutils-style shell commands
   (`ls`, `cat`, `stat`, `mkdir`, `touch`, `write`, `rm`)
 - IPC (pipes, message queues), CPU-count detection (SMP), a simulated in-memory GUI
@@ -59,16 +59,16 @@ This roadmap previously undercounted progress — several phases below were mark
   `uecho` shell command. There is still only one shared input line buffer, so a
   process reading concurrently with the shell's own prompt can race it — no
   per-process input queue/tty layer yet
-- [ ] **Known bug: ring-3 execution crashes.** The `forktest`, `user`, and `counters`
-  shell commands (`kernel/proc_commands.c`) IRET into ring 3 and complete their first
-  syscall correctly, then crash with an Invalid Opcode exception (EIP reads back as a
-  small garbage value like `0x7`) a few instructions later. Confirmed via GDB
-  single-stepping that the code, page mappings, and GDT are all correct in isolation —
-  the crash only reproduces under real, non-single-stepped timer-interrupt delivery.
-  A scheduler race in `process_create_user()` (PCB made schedulable before its fields
-  were set) and a missing `cli` in `enter_user_mode()` (`arch/x86/context.S`) were
-  found and fixed while investigating, but neither was the root cause — this bug is
-  still open.
+- [x] **Fixed: ring-3 execution crashed.** Root cause: `vmm_init()` loaded CR3 but never
+  set CR0.PG, so paging was never on. Per-process user stacks live at virtual
+  `0x08000000`, which without paging is a raw physical address beyond the VM's RAM;
+  ring-3 code read garbage back from its own stack and returned to EIP 0 / a small
+  value (hence Invalid Opcode). Fix (`memory/vmm.c`): enable CR0.PG|WP. Two follow-on
+  bugs fixed at the same time: page directories (2 pages) are now allocated with a real
+  contiguous allocator, `pmm_alloc_pages()` (`memory/pmm.c`), instead of two
+  `pmm_alloc_page()` calls that failed once memory was fragmented, and are freed in full;
+  and children of kernel threads such as the shell are auto-reaped
+  (`process/scheduler.c`) instead of staying zombies forever.
 - [ ] `exec()` — not implemented; user "processes" are kernel-linked function pointers
 
 ## Phase 6: Enhanced Shell — ✅ Complete
@@ -114,9 +114,7 @@ isolation between processes or between user and kernel memory.
 **Residual scope** (not done here — separate, larger work):
 - `.text` stays user-writable, not just user-executable — full W^X needs `exec()`
   so ring-3 code isn't kernel-linked into the same image
-- This item covers the *mappings* being correct (verified with GDB), not ring-3
-  *execution* being crash-free — see Phase 5's known-bug entry above; running the
-  actual `forktest`/`user`/`counters` commands still crashes
+- Paging is now really enabled, so these mappings are enforced by the MMU
 
 ## Contributing to the Roadmap
 

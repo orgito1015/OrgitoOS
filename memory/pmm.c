@@ -194,6 +194,43 @@ void *pmm_alloc_page(void) {
 }
 
 /*
+ * Allocate `count` physically contiguous pages (first fit).
+ *
+ * Page directories span more than one page (see memory/vmm.h), so they
+ * need a contiguous run. Calling pmm_alloc_page() repeatedly does not
+ * guarantee that: once processes have exited, freed single pages sit in
+ * the middle of used memory, first-fit hands one of those out, and the
+ * next page is not adjacent to it.
+ */
+void *pmm_alloc_pages(uint32_t count) {
+    if (count == 0) {
+        return NULL;
+    }
+    uint32_t run = 0;
+    for (uint32_t page = 0; page < total_pages; page++) {
+        if (bitmap_test(page)) {
+            run = 0;
+            continue;
+        }
+        if (++run == count) {
+            uint32_t first = page + 1 - count;
+            for (uint32_t i = first; i <= page; i++) {
+                bitmap_set(i);
+            }
+            used_pages += count;
+            return (void *)(first * PMM_PAGE_SIZE);
+        }
+    }
+    return NULL;
+}
+
+void pmm_free_pages(void *page, uint32_t count) {
+    for (uint32_t i = 0; i < count; i++) {
+        pmm_free_page((void *)((uint32_t)(uintptr_t)page + i * PMM_PAGE_SIZE));
+    }
+}
+
+/*
  * Free a physical page
  */
 void pmm_free_page(void *page) {

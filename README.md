@@ -73,10 +73,10 @@ See [docs/architecture/ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md) for d
 - ✅ **Process control blocks** - PID/PPID, state, priority, kernel/user stacks (`process/process.h`)
 - ✅ **Context switching** - Callee-saved register switch on the kernel stack (`arch/x86/context.S`)
 - ✅ **Multilevel round-robin scheduler** - 3 priority levels with anti-starvation aging, 50ms quantum (`process/scheduler.c`)
-- ⚠️ **Ring 3 user mode** - GDT/TSS-based privilege transitions (`arch/x86/gdt.c`, `context.S`); IRET into ring 3 and the first syscall both work, but the `forktest`/`user`/`counters` shell commands crash with an Invalid Opcode exception shortly after — a real, unresolved bug in ring-3 execution under real (non-single-stepped) interrupt timing, not a scheduler/race issue (both of those were checked and ruled out)
+- ✅ **Ring 3 user mode** - GDT/TSS-based privilege transitions (`arch/x86/gdt.c`, `context.S`), each user process in its own paged address space (paging is enabled in `memory/vmm.c`)
 - ✅ **System calls** - `int 0x80` gate with `exit`/`write`/`getpid`/`fork`/`yield`/`sleep`/`getppid`/`wait` (`kernel/syscall.c`)
 - ✅ **Kernel heap allocator** - `kmalloc`/`kfree` first-fit free list (`memory/heap.c`)
-- ⚠️ **Shell process commands** - `ps`, `kill`, `spawn`, `sched`, `psleep` work; `forktest`, `user`, `counters`, `uecho` launch a ring-3 process but currently crash it (see above) (`kernel/proc_commands.c`)
+- ✅ **Shell process commands** - `ps`, `kill`, `spawn`, `sched`, `psleep`, and the ring-3 demos `forktest`, `user`, `counters`, `uecho` (`kernel/proc_commands.c`)
 - ✅ **`read()` syscall** - ring 3 processes can now read a line of keyboard input via `int 0x80` (`kernel/syscall.c`, `include/usyscall.h`), demoed by the `uecho` shell command
 
 ### POSIX File I/O & strace (✅ Complete)

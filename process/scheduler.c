@@ -84,7 +84,7 @@ static process_t *pick_next(void) {
 
 /*
  * Free the stacks of zombies nobody is waiting for. A zombie whose
- * parent is still alive is kept (its exit code may be collected via
+ * parent is a live *user* process is kept (its exit code may be collected via
  * process_wait()); once the parent is gone it is released. The process
  * that just called process_exit() is skipped while it is still
  * `current` — its kernel stack is in use until we switch away.
@@ -98,7 +98,11 @@ static void reap_orphans(void) {
         process_t *parent = process_by_pid(p->ppid);
         if (!parent || parent->state == PROCESS_STATE_UNUSED ||
             parent->state == PROCESS_STATE_ZOMBIE ||
-            parent->pid == 0 /* children of idle/kernel auto-reap */) {
+            parent->pid == 0 /* children of idle/kernel auto-reap */ ||
+            /* Kernel threads (e.g. the shells) never call wait(): their
+             * children would otherwise stay zombies forever, each one
+             * holding a kernel stack and a page directory. */
+            (!parent->is_user && !parent->parent_waiting)) {
             process_release(p);
         }
     }
