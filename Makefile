@@ -7,6 +7,9 @@ OUTPUT_DIR = build
 OBJDIR = $(OUTPUT_DIR)/obj
 OUTPUT_BIN = $(OUTPUT_DIR)/$(TARGET).bin
 
+# `make` with no target builds the kernel (rules below come before `all`)
+.DEFAULT_GOAL := all
+
 # QEMU settings
 QEMU     = qemu-system-i386
 ISO_FILE = orgitoos.iso
@@ -14,7 +17,13 @@ ISO_FILE = orgitoos.iso
 # instead of staying pinned at the tiny native 720x400 text-mode pixel
 # size, so maximizing/resizing the window actually makes the display
 # bigger.
-QEMU_FLAGS = -cdrom $(ISO_FILE) -boot d -display gtk,zoom-to-fit=on
+# disk.img is the persistent hard disk (primary master, OrgitoFS mounted at
+# /mnt by fs/diskfs.c). It is created once by `make disk` and kept across
+# `make clean`; delete it with `make disk-clean` to start from an empty disk.
+DISK_IMG  = disk.img
+DISK_SIZE_MB = 32
+QEMU_DISK = -drive file=$(DISK_IMG),format=raw,index=0,media=disk
+QEMU_FLAGS = -cdrom $(ISO_FILE) -boot d $(QEMU_DISK) -display gtk,zoom-to-fit=on
 
 # Compiler selection: prefer cross-compiler, fallback to native gcc
 CC := $(shell command -v i686-elf-gcc 2> /dev/null || echo gcc)
@@ -80,11 +89,13 @@ C_SOURCES = $(ARCH_DIR)/gdt.c $(ARCH_DIR)/idt.c $(ARCH_DIR)/pic.c $(ARCH_DIR)/ex
             $(KERNEL_DIR)/proc_commands.c $(KERNEL_DIR)/panic.c $(KERNEL_DIR)/string.c \
             $(KERNEL_DIR)/shell.c $(KERNEL_DIR)/commands.c $(KERNEL_DIR)/ipc.c \
             $(KERNEL_DIR)/smp.c $(KERNEL_DIR)/gui.c $(KERNEL_DIR)/network.c $(KERNEL_DIR)/script.c \
+            $(KERNEL_DIR)/fileio.c $(KERNEL_DIR)/posix_commands.c $(KERNEL_DIR)/exec.c \
             $(CPU_DIR)/pipeline.c $(CPU_DIR)/single_cycle.c $(CPU_DIR)/performance.c \
             $(MEMORY_DIR)/pmm.c $(MEMORY_DIR)/vmm.c $(MEMORY_DIR)/heap.c \
             $(MEMORY_DIR)/cache.c $(MEMORY_DIR)/bus.c \
             $(DRIVERS_DIR)/console.c $(DRIVERS_DIR)/serial.c $(DRIVERS_DIR)/keyboard.c $(DRIVERS_DIR)/timer.c \
-            $(FS_DIR)/vfs.c \
+            $(DRIVERS_DIR)/ata.c \
+            $(FS_DIR)/vfs.c $(FS_DIR)/diskfs.c \
             $(PROCESS_DIR)/process.c $(PROCESS_DIR)/scheduler.c \
             $(COMPILER_DIR)/oc_platform.c $(COMPILER_DIR)/lexer.c $(COMPILER_DIR)/ast.c \
             $(COMPILER_DIR)/parser.c $(COMPILER_DIR)/codegen.c $(COMPILER_DIR)/vm.c \
@@ -98,7 +109,51 @@ C_OBJS   = $(patsubst %.c,$(OBJDIR)/%.o,$(C_SOURCES))
 ASM_OBJS = $(patsubst %.S,$(OBJDIR)/%.o,$(ASM_SOURCES))
 EXCEPTIONS_ASM_OBJ = $(OBJDIR)/$(ARCH_DIR)/exceptions_asm.o
 
-OBJS = $(C_OBJS) $(ASM_OBJS) $(EXCEPTIONS_ASM_OBJ)
+# ------------------------------------------------------------------
+# Userland programs: real, standalone ELF32 executables
+# ------------------------------------------------------------------
+# Each program is compiled and linked on its own (userland/user.ld, load
+# address 0x40000000), never linked into the kernel. The finished ELF file
+# is then wrapped into an object with `objcopy -I binary`, embedded in the
+# kernel image, and copied into /bin at boot (kernel/exec.c), where the
+# shell runs it with exec() as a separate ring 3 process.
+#
+# FileCopy.c is plain POSIX C: the same file also builds on Linux with
+#   gcc -std=c99 -Wall -Wextra FileCopy.c -o FileCopy
+USERLAND_DIR = userland
+USER_BUILD   = $(OUTPUT_DIR)/user
+USER_CFLAGS  = -std=c99 -m32 -O2 -Wall -Wextra -ffreestanding -fno-pic -fno-pie \
+               -fno-stack-protector -fno-asynchronous-unwind-tables -nostdlib \
+               -I./include -D__ORGITOOS__
+USER_LDFLAGS = -m32 -nostdlib -static -no-pie -T $(USERLAND_DIR)/user.ld \
+               -Wl,--build-id=none -Wl,-z,noexecstack
+OBJCOPY := $(shell command -v i686-elf-objcopy 2> /dev/null || echo objcopy)
+
+# Object files of the C runtime + mini libc linked into programs with main()
+USER_RT = $(USER_BUILD)/crt0.o $(USER_BUILD)/ulib.o
+
+# Programs to build and embed (file name in /bin = ELF base name)
+USER_PROGS = $(USER_BUILD)/hello.elf $(USER_BUILD)/FileCopy.elf
+USER_BLOBS = $(USER_PROGS:.elf=_blob.o)
+
+$(USER_BUILD)/%.o: $(USERLAND_DIR)/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) $(DEPFLAGS) -c $< -o $@
+
+# hello.c defines its own _start (no crt0/libc)
+$(USER_BUILD)/hello.elf: $(USER_BUILD)/hello.o $(USERLAND_DIR)/user.ld
+	$(CC) $(USER_LDFLAGS) -o $@ $(USER_BUILD)/hello.o
+
+$(USER_BUILD)/FileCopy.elf: $(USER_BUILD)/FileCopy.o $(USER_RT) $(USERLAND_DIR)/user.ld
+	$(CC) $(USER_LDFLAGS) -o $@ $(USER_RT) $(USER_BUILD)/FileCopy.o
+
+# Embed: symbols are named after the file, e.g. _binary_FileCopy_elf_start
+$(USER_BUILD)/%_blob.o: $(USER_BUILD)/%.elf
+	cd $(USER_BUILD) && $(OBJCOPY) -I binary -O elf32-i386 -B i386 \
+		--rename-section .data=.rodata,alloc,load,readonly,data,contents \
+		$(notdir $<) $(notdir $@)
+
+OBJS = $(C_OBJS) $(ASM_OBJS) $(EXCEPTIONS_ASM_OBJ) $(USER_BLOBS)
 
 # Default target: build the kernel
 all: $(OUTPUT_BIN)
@@ -113,6 +168,10 @@ $(OBJDIR)/%.o: %.S
 	@mkdir -p $(dir $@)
 	$(CC) $(ASFLAGS) $(DEPFLAGS) -c $< -o $@
 
+$(FILECOPY_OBJ): $(USERLAND_DIR)/FileCopy.c
+	@mkdir -p $(dir $@)
+	$(CC) $(USERLAND_CFLAGS) $(DEPFLAGS) -c $< -o $@
+
 # arch/x86/exceptions.S shares a basename with arch/x86/exceptions.c, so it
 # needs an explicit rule to avoid colliding with that object's pattern match.
 $(EXCEPTIONS_ASM_OBJ): $(ARCH_DIR)/exceptions.S
@@ -121,7 +180,7 @@ $(EXCEPTIONS_ASM_OBJ): $(ARCH_DIR)/exceptions.S
 
 # Pull in auto-generated header dependencies (silently ignored on first build
 # before any .d files exist).
--include $(OBJS:.o=.d)
+-include $(C_OBJS:.o=.d) $(ASM_OBJS:.o=.d) $(wildcard $(USER_BUILD)/*.d)
 
 # Link all objects into final kernel binary
 $(OUTPUT_BIN): $(OBJS) linker.ld
@@ -147,8 +206,18 @@ benchmark: $(BENCHMARK_BIN)
 	@echo "Running CPU architecture benchmark..."
 	@./$(BENCHMARK_BIN)
 
+# Persistent disk image (created once, survives `make clean`)
+$(DISK_IMG):
+	@echo "Creating $(DISK_SIZE_MB) MiB disk image $(DISK_IMG) (formatted by OrgitoOS on first boot)..."
+	dd if=/dev/zero of=$(DISK_IMG) bs=1M count=$(DISK_SIZE_MB) status=none
+
+disk: $(DISK_IMG)
+
+disk-clean:
+	rm -f $(DISK_IMG)
+
 # Run kernel in QEMU (uses ISO boot)
-run: $(OUTPUT_BIN)
+run: $(OUTPUT_BIN) $(DISK_IMG)
 	@echo "Running OrgitoOS in QEMU..."
 	@chmod +x tools/run-qemu.sh
 	@./tools/run-qemu.sh
@@ -160,7 +229,7 @@ iso: $(OUTPUT_BIN)
 	@./tools/create-iso.sh
 
 # Run ISO in QEMU
-run-iso: iso
+run-iso: iso $(DISK_IMG)
 	@echo "Running OrgitoOS ISO in QEMU..."
 	@if command -v $(QEMU) &> /dev/null; then \
 		$(QEMU) $(QEMU_FLAGS); \
@@ -170,7 +239,7 @@ run-iso: iso
 	fi
 
 # Debug: run in QEMU with GDB stub enabled, paused, serial output to terminal
-debug: iso
+debug: iso $(DISK_IMG)
 	@echo "Starting OrgitoOS in QEMU with GDB server enabled (paused at startup)..."
 	@echo "  GDB server listening on tcp::1234"
 	@echo "  Attach with: make gdb  (in another terminal)"
@@ -195,7 +264,7 @@ gdb:
 	fi
 
 # Run in QEMU with logging enabled (output written to qemu.log)
-qemu-log: iso
+qemu-log: iso $(DISK_IMG)
 	@echo "Starting OrgitoOS in QEMU with logging to qemu.log..."
 	@if command -v $(QEMU) &> /dev/null; then \
 		$(QEMU) $(QEMU_FLAGS) -serial mon:stdio -d int,cpu_reset,guest_errors -D qemu.log; \
@@ -235,6 +304,8 @@ help:
 	@echo "  debug      - Build ISO and run in QEMU with GDB server (paused, serial to terminal)"
 	@echo "  gdb        - Launch GDB pre-configured to attach to QEMU (run 'make debug' first)"
 	@echo "  qemu-log   - Build ISO and run in QEMU with logging to qemu.log"
+	@echo "  disk       - Create the persistent disk image (disk.img, kept by clean)"
+	@echo "  disk-clean - Delete disk.img (next boot formats a fresh disk)"
 	@echo "  help       - Show this help message"
 	@echo ""
 	@echo "Directory Structure:"
@@ -252,4 +323,4 @@ help:
 	@echo "Compiler: $(CC)"
 	@echo "QEMU binary: $(QEMU)"
 
-.PHONY: all clean run iso run-iso run-vbox debug gdb qemu-log help benchmark
+.PHONY: disk disk-clean all clean run iso run-iso run-vbox debug gdb qemu-log help benchmark

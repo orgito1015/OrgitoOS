@@ -45,6 +45,22 @@ static inline uint32_t inl(uint16_t port) {
     return ret;
 }
 
+/* Read `count` 16-bit words from a port into `buf` (ATA PIO data) */
+static inline void insw(uint16_t port, void *buf, uint32_t count) {
+    __asm__ __volatile__("cld; rep insw"
+                         : "+D"(buf), "+c"(count)
+                         : "d"(port)
+                         : "memory");
+}
+
+/* Write `count` 16-bit words from `buf` to a port (ATA PIO data) */
+static inline void outsw(uint16_t port, const void *buf, uint32_t count) {
+    __asm__ __volatile__("cld; rep outsw"
+                         : "+S"(buf), "+c"(count)
+                         : "d"(port)
+                         : "memory");
+}
+
 /* I/O wait - used for short delays between I/O operations */
 static inline void io_wait(void) {
     /* Port 0x80 is used for 'checkpoints' during POST */

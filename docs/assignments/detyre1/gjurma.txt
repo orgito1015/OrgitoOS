@@ -1,0 +1,13 @@
+write(1, "Emri i skedarit burim: ", 23) = 23
+read(0, "burimi.txt\n", 512) = 11
+write(1, "Emri i skedarit destinacion: ", 29) = 29
+read(0, "kopja_trace.txt\n", 512) = 16
+openat(AT_FDCWD, "burimi.txt", O_RDONLY) = 3
+openat(AT_FDCWD, "kopja_trace.txt", O_WRONLY|O_CREAT|O_EXCL, 0644) = 4
+read(3, "Une jam Orgito Leka\n", 4096) = 20
+write(4, "Une jam Orgito Leka\n", 20) = 20
+read(3, "", 4096) = 0
+close(3) = 0
+close(4) = 0
+write(1, "Kopjimi perfundoi me sukses: 20 "..., 77) = 77
++++ exited with 0 +++

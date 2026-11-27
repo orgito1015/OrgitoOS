@@ -75,4 +75,9 @@ int console_pane_width(int pane);
  * every character typed/erased in the focused pane. */
 void console_focus_pane(int pane);
 
+/* Layout: 1 = single 80-column pane (left pane takes the full screen),
+ * 0 = default split screen. Clears the screen. */
+void console_set_fullscreen(int full);
+int console_is_fullscreen(void);
+
 #endif /* ORGITOOS_DRIVERS_CONSOLE_H */

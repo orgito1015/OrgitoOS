@@ -18,6 +18,9 @@
 #include "../drivers/console.h"
 #include "../drivers/serial.h"
 #include "../fs/vfs.h"
+#include "../fs/diskfs.h"
+#include "../drivers/ata.h"
+#include "exec.h"
 #include "../include/ipc.h"
 #include "../include/smp.h"
 #include "../include/gui.h"
@@ -109,11 +112,6 @@ void kmain(struct multiboot_info *mboot) {
     /* Initialize keyboard (this will unmask IRQ1) */
     keyboard_init();
 
-    /* Initialize VFS */
-    serial_write("[7/15] Initializing filesystem...\n");
-    vfs_init();
-    current_directory = vfs_get_root();
-
     /* Initialize physical memory manager */
     serial_write("[8/15] Initializing physical memory manager...\n");
     pmm_init(mboot);
@@ -125,31 +123,34 @@ void kmain(struct multiboot_info *mboot) {
     /*
      * Initialize the kernel heap on a PMM-backed region.
      *
-     * Reserve a contiguous run of physical pages while paging still maps
-     * all RAM identity (virt == phys), so the heap base is valid as a
-     * pointer. 1024 pages = 4 MiB of dynamic kernel memory.
+     * A contiguous run of physical pages inside the kernel's identity
+     * map (virt == phys), so the heap base is valid as a pointer.
+     * 2048 pages = 8 MiB of dynamic kernel memory (file data, ELF images
+     * being loaded, kernel stacks).
      */
     {
-        #define HEAP_PAGES 1024u
-        void *heap_start = pmm_alloc_page();
-        void *heap_prev  = heap_start;
-        uint32_t got = (heap_start != 0) ? 1u : 0u;
-        while (got < HEAP_PAGES) {
-            void *p = pmm_alloc_page();
-            /* Require physically contiguous pages for a flat arena. */
-            if (p == 0 || (uint32_t)p != (uint32_t)heap_prev + 0x1000u) {
-                if (p != 0) {
-                    pmm_free_page(p);
-                }
-                break;
-            }
-            heap_prev = p;
-            got++;
-        }
-        if (heap_start != 0 && got > 0u) {
-            heap_init(heap_start, (size_t)got * 0x1000u);
+        #define HEAP_PAGES 2048u     /* 8 MiB */
+        void *heap_start = pmm_alloc_pages(HEAP_PAGES);
+        if (heap_start != 0) {
+            heap_init(heap_start, (size_t)HEAP_PAGES * 0x1000u);
         }
         #undef HEAP_PAGES
+    }
+
+    /* Initialize VFS (after the heap: file data is heap-allocated) */
+    serial_write("[7/15] Initializing filesystem...\n");
+    vfs_init();
+    current_directory = vfs_get_root();
+
+    /* Programs in /bin: ELF files built from userland/ and embedded in
+     * the kernel image (kernel/exec.c). */
+    exec_install_embedded_programs();
+
+    /* Persistent disk: ATA driver + OrgitoFS mounted at /mnt. Without a
+     * disk (QEMU started without disk.img) /mnt is simply absent. */
+    serial_write("[7b/15] Detecting disk and mounting /mnt...\n");
+    if (ata_init() == 0) {
+        diskfs_init();
     }
 
     /* Initialize IPC mechanisms */

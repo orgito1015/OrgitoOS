@@ -170,7 +170,37 @@ static int ata_select_lba(uint32_t lba, uint8_t sector_count) {
     return 0;
 }
 
+/* One PIO transfer at a time: two processes issuing commands to the same
+ * drive at once would interleave their register writes. Transfers are
+ * short (polled, a few sectors), so simply running each one with
+ * interrupts disabled is the lock. */
+static inline uint32_t ata_lock(void) {
+    uint32_t f;
+    __asm__ __volatile__("pushf; pop %0; cli" : "=r"(f) :: "memory");
+    return f;
+}
+static inline void ata_unlock(uint32_t f) {
+    if (f & 0x200) __asm__ __volatile__("sti" ::: "memory");
+}
+
+static int ata_read_sectors_locked(uint32_t lba, uint8_t count, void *buffer);
+static int ata_write_sectors_locked(uint32_t lba, uint8_t count, const void *buffer);
+
 int ata_read_sectors(uint32_t lba, uint8_t count, void *buffer) {
+    uint32_t f = ata_lock();
+    int r = ata_read_sectors_locked(lba, count, buffer);
+    ata_unlock(f);
+    return r;
+}
+
+int ata_write_sectors(uint32_t lba, uint8_t count, const void *buffer) {
+    uint32_t f = ata_lock();
+    int r = ata_write_sectors_locked(lba, count, buffer);
+    ata_unlock(f);
+    return r;
+}
+
+static int ata_read_sectors_locked(uint32_t lba, uint8_t count, void *buffer) {
     if (!disk_present || !buffer || count == 0) return -1;
     if ((uint64_t)lba + count > disk_sectors) return -1;
 
@@ -189,7 +219,7 @@ int ata_read_sectors(uint32_t lba, uint8_t count, void *buffer) {
     return 0;
 }
 
-int ata_write_sectors(uint32_t lba, uint8_t count, const void *buffer) {
+static int ata_write_sectors_locked(uint32_t lba, uint8_t count, const void *buffer) {
     if (!disk_present || !buffer || count == 0) return -1;
     if ((uint64_t)lba + count > disk_sectors) return -1;
 

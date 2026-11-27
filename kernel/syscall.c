@@ -35,6 +35,8 @@
 #include "../drivers/keyboard.h"
 #include "../arch/x86/idt.h"
 #include "../arch/x86/gdt.h"
+#include "fileio.h"
+#include "exec.h"
 
 /* Scratch virtual address used to briefly map a freshly-allocated child
  * stack page into the parent's own (currently active) address space so it
@@ -56,7 +58,7 @@ void syscall_init(void) {
                  KERNEL_CODE_SEGMENT, IDT_FLAGS_USER);
     /* Boot-time status only - kept off the narrow split-pane screen, still
      * visible via serial (see kernel/kernel.c's boot banner comment). */
-    serial_write("Syscalls: int 0x80 gate installed (9 syscalls)\n");
+    serial_write("Syscalls: int 0x80 gate installed (14 syscalls)\n");
 }
 
 /* ------------------------------------------------------------------ */
@@ -147,6 +149,35 @@ static int sys_fork(regs_t *parent_regs) {
                      (uint32_t)phys, PTE_PRESENT | PTE_WRITABLE | PTE_USER);
     }
 
+    /* Deep-copy a loaded ELF image (kernel/exec.c) the same way: private
+     * pages at identical virtual addresses. Every physical page the PMM
+     * hands out is inside the kernel's identity map (see vmm_init), so
+     * the copy can go physical-to-physical directly. */
+    exec_page_t *child_exec = 0;
+    uint32_t child_exec_count = 0;
+    if (parent->exec_page_count) {
+        child_exec = (exec_page_t *)kmalloc(parent->exec_page_count * sizeof(exec_page_t));
+        int ok = child_exec != 0;
+        for (uint32_t i = 0; ok && i < parent->exec_page_count; i++) {
+            void *phys = pmm_alloc_page();
+            if (!phys) { ok = 0; break; }
+            memcpy(phys, (void *)parent->exec_pages[i].phys, PAGE_SIZE);
+            child_exec[i] = parent->exec_pages[i];
+            child_exec[i].phys = (uint32_t)phys;
+            vmm_map_page(child_dir, (void *)child_exec[i].vaddr, (uint32_t)phys,
+                         child_exec[i].flags);
+            child_exec_count++;
+        }
+        if (!ok) {
+            for (uint32_t i = 0; i < child_exec_count; i++) pmm_free_page((void *)child_exec[i].phys);
+            if (child_exec) kfree(child_exec);
+            for (int i = 0; i < PROCESS_USTACK_PAGES; i++) pmm_free_page((void *)child_ustack_phys[i]);
+            vmm_destroy_directory(child_dir);
+            kfree(child_kstack);
+            return -1;
+        }
+    }
+
     __asm__ __volatile__("cli");
 
     /* PCB */
@@ -160,6 +191,8 @@ static int sys_fork(regs_t *parent_regs) {
     }
     if (!child) {
         __asm__ __volatile__("sti");
+        for (uint32_t i = 0; i < child_exec_count; i++) pmm_free_page((void *)child_exec[i].phys);
+        if (child_exec) kfree(child_exec);
         for (int i = 0; i < PROCESS_USTACK_PAGES; i++) pmm_free_page((void *)child_ustack_phys[i]);
         vmm_destroy_directory(child_dir);
         kfree(child_kstack);
@@ -173,24 +206,8 @@ static int sys_fork(regs_t *parent_regs) {
     child->cpu_ticks      = 0;
     child->wait_ticks     = 0;
 
-    /* New pid: reuse process_by_pid-safe allocation via a scan. */
-    {
-        uint32_t pid = 1;
-        for (;;) {
-            int taken = 0;
-            for (int i = 0; i < PROCESS_MAX; i++) {
-                process_t *s = process_table_entry(i);
-                if (s && s != child && s->state != PROCESS_STATE_UNUSED &&
-                    s->pid == pid) {
-                    taken = 1;
-                    break;
-                }
-            }
-            if (!taken) break;
-            pid++;
-        }
-        child->pid = pid;
-    }
+    /* New, never-used pid (same counter as alloc_pcb()). */
+    child->pid = process_next_pid();
     child->ppid = parent->pid;
 
     /* Stacks and address space */
@@ -199,6 +216,13 @@ static int sys_fork(regs_t *parent_regs) {
     child->page_dir   = child_dir;
     for (int i = 0; i < PROCESS_USTACK_PAGES; i++) child->ustack_phys[i] = child_ustack_phys[i];
     child->ustack_top = parent->ustack_top;  /* identical fixed virtual window */
+    child->exec_pages      = child_exec;
+    child->exec_page_count = child_exec_count;
+    child->keep_zombie     = 0;
+
+    /* Open files are shared with the parent, as in Unix: each inherited
+     * descriptor takes another reference on the same open-file entry. */
+    fileio_fork_fds(child);
 
     /* 3. Build the child's kernel stack. */
     uint32_t sp = child->kstack_top;
@@ -277,6 +301,49 @@ void syscall_dispatch(regs_t *r) {
         case SYS_READ:
             r->eax = (uint32_t)sys_read((char *)r->ebx, r->ecx);
             break;
+
+        /* ---- POSIX file I/O, traced by `strace` ---- */
+        case SYS_OPEN: {
+            int ret = fileio_open((const char *)r->ebx, (int)r->ecx, r->edx);
+            fileio_trace_open((const char *)r->ebx, (int)r->ecx, r->edx, ret);
+            r->eax = (uint32_t)ret;
+            break;
+        }
+
+        case SYS_CLOSE: {
+            int ret = fileio_close((int)r->ebx);
+            fileio_trace_close((int)r->ebx, ret);
+            r->eax = (uint32_t)ret;
+            break;
+        }
+
+        case SYS_FDREAD: {
+            int ret = fileio_read((int)r->ebx, (void *)r->ecx, r->edx);
+            fileio_trace_rw(0, (int)r->ebx, (const void *)r->ecx, r->edx, ret);
+            r->eax = (uint32_t)ret;
+            break;
+        }
+
+        case SYS_FDWRITE: {
+            int ret = fileio_write((int)r->ebx, (const void *)r->ecx, r->edx);
+            fileio_trace_rw(1, (int)r->ebx, (const void *)r->ecx, r->edx, ret);
+            r->eax = (uint32_t)ret;
+            break;
+        }
+
+        case SYS_EXEC: {
+            /* Spawn the ELF at path as a child of the caller; the caller
+             * collects it with wait(). */
+            int err = 0;
+            process_t *child = process_exec((const char *)r->ebx, PRIORITY_NORMAL, 0, &err);
+            if (child) {
+                process_start(child);
+                r->eax = child->pid;
+            } else {
+                r->eax = (uint32_t)(-err);
+            }
+            break;
+        }
 
         default:
             r->eax = (uint32_t)-1;

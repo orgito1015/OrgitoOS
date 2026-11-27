@@ -51,8 +51,21 @@ typedef enum {
     PROCESS_STATE_TERMINATED = PROCESS_STATE_ZOMBIE  /* Legacy alias    */
 } process_state_t;
 
+/* One page of a loaded ELF image (kernel/exec.c): the virtual address it
+ * is mapped at in the process's own page directory, the private physical
+ * page backing it, and its PTE flags. Freed when the process exits;
+ * deep-copied by fork(). */
+typedef struct exec_page {
+    uint32_t vaddr;
+    uint32_t phys;
+    uint32_t flags;
+} exec_page_t;
+
 /* Process entry point type (kernel threads) */
 typedef void (*process_entry_t)(void *arg);
+
+/* Per-process file descriptor table size */
+#define PROCESS_MAX_FDS 16
 
 /* Process control block */
 typedef struct process {
@@ -97,10 +110,29 @@ typedef struct process {
                                        * page_dir. Zero entries are unused
                                        * (kernel threads never populate this). */
 
+    /* POSIX-style file descriptors (kernel/fileio.c). Each entry is an
+     * index+1 into the global open-file table, 0 = unused. Descriptors
+     * 0, 1 and 2 are always stdin (keyboard), stdout and stderr (console),
+     * so the first open() returns 3, exactly as on Linux. */
+    int16_t          fd_table[PROCESS_MAX_FDS];
+
+    /* System-call tracing (the `strace` shell command). trace_mask is a
+     * bitmask of FILEIO_TRACE_* classes; trace_out is the VFS node the
+     * trace is appended to, or NULL to print it on the console. */
+    uint32_t         trace_mask;
+    void            *trace_out;
+
+    /* Loaded ELF image (kernel/exec.c); NULL/0 for kernel-linked
+     * ring 3 demos and kernel threads. */
+    exec_page_t     *exec_pages;
+    uint32_t         exec_page_count;
+
     /* Sleep / exit bookkeeping */
     uint64_t         sleep_until;    /* Wake tick when SLEEPING          */
     int              exit_code;
     int              parent_waiting; /* Parent blocked in process_wait() */
+    int              keep_zombie;    /* Parent will waitpid() for this
+                                      * child: do not auto-reap it      */
 } process_t;
 
 /* ---- Lifecycle ---------------------------------------------------- */
@@ -116,6 +148,15 @@ process_t *process_create(const char *name, process_entry_t entry,
 process_t *process_create_user(const char *name, void (*entry)(void),
                                uint8_t priority);
 
+/* Like process_create_user(), but the process is created SUSPENDED: it is
+ * not runnable until process_start() is called. Used by exec() so the
+ * ELF image can be mapped into the new address space before the process
+ * can possibly run. The child inherits its parent's console pane and
+ * strace settings. */
+process_t *process_create_user_suspended(const char *name, uint32_t entry,
+                                         uint8_t priority);
+void process_start(process_t *p);
+
 /* Terminate the calling process. Never returns. */
 void process_exit(int code) __attribute__((noreturn));
 
@@ -126,6 +167,10 @@ int process_kill(uint32_t pid);
  * If status != NULL, receives the child's exit code. */
 int process_wait(int *status);
 
+/* Block until the child `pid` exits (pid == -1: any child); reaps it.
+ * Returns the child's pid, or -1 if there is no such child. */
+int process_waitpid(int pid, int *status);
+
 /* Sleep the calling process for at least `ms` milliseconds. */
 void process_sleep(uint32_t ms);
 
@@ -135,6 +180,7 @@ process_t *process_current(void);
 uint32_t   process_getpid(void);
 uint32_t   process_getppid(void);
 process_t *process_by_pid(uint32_t pid);
+uint32_t   process_next_pid(void);                 /* IRQs disabled */
 process_t *process_table_entry(int index);      /* index 0..PROCESS_MAX-1 */
 const char *process_state_name(process_state_t s);
 int         process_count(void);

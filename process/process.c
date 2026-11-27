@@ -24,6 +24,7 @@
  */
 
 #include "process.h"
+#include "../kernel/fileio.h"
 #include "scheduler.h"
 #include "../memory/heap.h"
 #include "../memory/pmm.h"
@@ -43,6 +44,13 @@ static uint32_t  next_pid = 1;
 
 /* Currently running process (set up by process_init/scheduler) */
 process_t *current_process = 0;
+
+/* Next unused pid. Interrupts must be disabled. Used by fork() too, so
+ * pids are never handed out twice (a reused pid could be mistaken for
+ * the old process by a parent waiting on it). */
+uint32_t process_next_pid(void) {
+    return next_pid++;
+}
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                              */
@@ -156,6 +164,10 @@ static process_t *process_create_internal(const char *name, process_entry_t entr
 
     copy_name(p, name);
     p->ppid          = current_process ? current_process->pid : 0;
+    /* Inherit the parent's console pane (a program started from the
+     * right-hand shell prints and reads there). Shell threads override
+     * this themselves in shell_task(). */
+    p->pane          = current_process ? current_process->pane : 0;
     p->priority      = priority;
     p->base_priority = priority;
     p->quantum_left  = SCHED_QUANTUM_TICKS;
@@ -222,8 +234,8 @@ static void user_process_trampoline(void *arg) {
     /* Not reached: user code exits via sys_exit(). */
 }
 
-process_t *process_create_user(const char *name, void (*entry)(void),
-                               uint8_t priority) {
+static process_t *create_user_common(const char *name, uint32_t entry,
+                                     uint8_t priority, int suspended) {
     /*
      * Give this process its own address space: a directory cloned from the
      * kernel's (so code/heap stay reachable, unchanged from today) plus a
@@ -276,10 +288,41 @@ process_t *process_create_user(const char *name, void (*entry)(void),
     }
     /* Keep ESP 16-byte aligned and leave a small red zone at the top. */
     p->ustack_top = ((PROCESS_USTACK_VIRT_BASE + PROCESS_USTACK_SIZE) & ~0xFu) - 16;
-    p->user_entry = (uint32_t)entry;
+    p->user_entry = entry;
+
+    if (suspended) {
+        /* Not runnable until process_start(): exec() maps the ELF image
+         * first. Inherit the creator's strace settings, like strace -f. */
+        if (current_process) {
+            p->trace_mask = current_process->trace_mask;
+            p->trace_out  = current_process->trace_out;
+        }
+        p->state = PROCESS_STATE_BLOCKED;
+        irq_enable();
+        return p;
+    }
 
     process_activate(p);
     return p;
+}
+
+process_t *process_create_user(const char *name, void (*entry)(void),
+                               uint8_t priority) {
+    return create_user_common(name, (uint32_t)entry, priority, 0);
+}
+
+process_t *process_create_user_suspended(const char *name, uint32_t entry,
+                                         uint8_t priority) {
+    return create_user_common(name, entry, priority, 1);
+}
+
+void process_start(process_t *p) {
+    irq_disable();
+    if (p && p->state == PROCESS_STATE_BLOCKED) {
+        p->state = PROCESS_STATE_READY;
+        scheduler_enqueue(p);
+    }
+    irq_enable();
 }
 
 /* ------------------------------------------------------------------ */
@@ -299,6 +342,14 @@ static void free_ustack_pages(process_t *p) {
             p->ustack_phys[i] = 0;
         }
     }
+    /* Pages of a loaded ELF image (kernel/exec.c). The tracking array
+     * itself is kfree'd in process_release(). */
+    for (uint32_t i = 0; i < p->exec_page_count; i++) {
+        if (p->exec_pages && p->exec_pages[i].phys) {
+            pmm_free_page((void *)p->exec_pages[i].phys);
+            p->exec_pages[i].phys = 0;
+        }
+    }
 }
 
 void process_exit(int code) {
@@ -308,6 +359,9 @@ void process_exit(int code) {
 
     self->exit_code = code;
     self->state     = PROCESS_STATE_ZOMBIE;
+
+    /* Release any files the process left open (like a Unix exit()). */
+    fileio_close_all(self);
 
     /* User stack can be freed now; the kernel stack is still in use
      * until we have switched away, so the reaper frees it later. */
@@ -366,6 +420,10 @@ int process_kill(uint32_t pid) {
 }
 
 int process_wait(int *status) {
+    return process_waitpid(-1, status);
+}
+
+int process_waitpid(int pid_wanted, int *status) {
     for (;;) {
         irq_disable();
 
@@ -374,6 +432,7 @@ int process_wait(int *status) {
             process_t *p = &process_table[i];
             if (p->state == PROCESS_STATE_UNUSED) continue;
             if (p->ppid != current_process->pid || p == current_process) continue;
+            if (pid_wanted != -1 && (int)p->pid != pid_wanted) continue;
 
             have_children = 1;
             if (p->state == PROCESS_STATE_ZOMBIE) {
@@ -474,6 +533,11 @@ void process_release(process_t *p) {
         vmm_destroy_directory(p->page_dir);
     }
     p->page_dir = 0;
+    if (p->exec_pages) {
+        kfree(p->exec_pages);
+        p->exec_pages = 0;
+    }
+    p->exec_page_count = 0;
     p->state = PROCESS_STATE_UNUSED;
     p->pid   = 0;
 }

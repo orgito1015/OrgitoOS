@@ -106,22 +106,11 @@ void vmm_init(void) {
      */
     uint32_t dir_pages = (sizeof(struct page_directory) + PAGE_SIZE - 1) / PAGE_SIZE;
 
-    void *dir_phys = pmm_alloc_page();
+    void *dir_phys = pmm_alloc_pages(dir_pages);
     if (dir_phys == NULL) {
+        /* No contiguous run available: leave paging disabled rather
+         * than corrupt RAM. */
         return;
-    }
-    /* Claim the remaining contiguous pages the directory needs. */
-    {
-        void *expect = (void *)((uint32_t)dir_phys + PAGE_SIZE);
-        for (uint32_t i = 1; i < dir_pages; i++) {
-            void *p = pmm_alloc_page();
-            if (p != expect) {
-                /* PMM could not give us a contiguous run; cannot proceed
-                 * safely, so leave paging disabled rather than corrupt RAM. */
-                return;
-            }
-            expect = (void *)((uint32_t)p + PAGE_SIZE);
-        }
     }
 
     kernel_directory = (struct page_directory *)dir_phys;
@@ -178,6 +167,14 @@ void vmm_init(void) {
      */
     vmm_identity_map_region(kernel_directory, 0, ram_end,
                            PTE_PRESENT | PTE_WRITABLE);
+
+    /* The kernel reaches physical pages through this identity map (page
+     * tables, a new process's pages while it is being built, fork()
+     * copies). RAM above the map's cap would be unreachable once paging
+     * is on, so hide it from the PMM instead of handing it out. */
+    for (uint32_t addr = ram_end; addr < pmm_get_max_address(); addr += PAGE_SIZE) {
+        pmm_mark_used((void *)addr);
+    }
     vmm_identity_map_region(kernel_directory, kernel_start,
                            (uint32_t)rodata_start - (uint32_t)kernel_start,
                            PTE_PRESENT | PTE_WRITABLE | PTE_USER);
@@ -187,6 +184,17 @@ void vmm_init(void) {
     
     /* Load page directory into CR3 */
     vmm_switch_directory(kernel_directory);
+
+    /* Turn paging on (CR0.PG). Without this, CR3 is loaded but ignored:
+     * every address is used as a raw physical address, so per-process
+     * mappings such as the user stack at PROCESS_USTACK_VIRT_BASE
+     * (0x08000000) silently hit non-existent RAM and ring 3 code reads
+     * garbage back from its own stack. CR0.WP makes the CPU honour
+     * read-only pages in ring 0 too. */
+    uint32_t cr0;
+    __asm__ __volatile__("mov %%cr0, %0" : "=r"(cr0));
+    cr0 |= 0x80000000u | 0x00010000u;   /* PG | WP */
+    __asm__ __volatile__("mov %0, %%cr0" : : "r"(cr0) : "memory");
 }
 
 /*
@@ -197,21 +205,9 @@ struct page_directory *vmm_create_directory(void) {
      * pages, so reserve a contiguous run rather than a single page. */
     uint32_t dir_pages = (sizeof(struct page_directory) + PAGE_SIZE - 1) / PAGE_SIZE;
 
-    void *dir_phys = pmm_alloc_page();
+    void *dir_phys = pmm_alloc_pages(dir_pages);
     if (dir_phys == NULL) {
         return NULL;
-    }
-    {
-        void *expect = (void *)((uint32_t)dir_phys + PAGE_SIZE);
-        for (uint32_t i = 1; i < dir_pages; i++) {
-            void *p = pmm_alloc_page();
-            if (p != expect) {
-                /* Roll back is not tracked here; fail safe by returning NULL.
-                 * Caller must handle allocation failure. */
-                return NULL;
-            }
-            expect = (void *)((uint32_t)p + PAGE_SIZE);
-        }
     }
 
     struct page_directory *dir = (struct page_directory *)dir_phys;
@@ -269,8 +265,8 @@ void vmm_destroy_directory(struct page_directory *dir) {
         }
     }
 
-    /* Free the directory itself */
-    pmm_free_page(dir);
+    /* Free the directory itself (it spans several contiguous pages) */
+    pmm_free_pages(dir, (sizeof(struct page_directory) + PAGE_SIZE - 1) / PAGE_SIZE);
 }
 
 /*

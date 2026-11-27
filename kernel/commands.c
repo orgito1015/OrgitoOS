@@ -18,6 +18,7 @@
 #include "../include/network.h"
 #include "../include/script.h"
 #include "../compiler/oc_run.h"
+#include "fileio.h"
 
 /* Forward declaration for accessing command table */
 const shell_command_t* shell_get_commands(int* count);
@@ -80,6 +81,7 @@ void commands_register_all(void) {
     shell_register_command("meminfo", "Show physical and heap memory usage", cmd_meminfo);
     shell_register_command("reboot", "Reboot the system", cmd_reboot);
     shell_register_command("color", "Change this pane's text/background color [color <fg> <bg>]", cmd_color);
+    posix_commands_register();
     shell_register_command("occ", "Compile and run an OrgitoCompiler (.oc) source file [occ <file>]", cmd_occ);
     
     /* New feature test commands */
@@ -159,9 +161,17 @@ void cmd_echo(int argc, char** argv) {
  * Uname command - Display OS name and version
  */
 void cmd_uname(int argc, char** argv) {
-    (void)argc;  /* Unused parameter */
-    (void)argv;  /* Unused parameter */
-    
+    /* uname -r : kernel release only (like Linux) */
+    if (argc >= 2 && string_compare(argv[1], "-r") == 0) {
+        console_write(ORGITOOS_KERNEL_RELEASE "\n");
+        return;
+    }
+    /* uname -a : one-line summary */
+    if (argc >= 2 && string_compare(argv[1], "-a") == 0) {
+        console_write("OrgitoOS orgito " ORGITOOS_KERNEL_RELEASE " i386\n");
+        return;
+    }
+
     console_write("OrgitoOS version 0.1.0\n");
     console_write("Architecture: i386 (32-bit x86)\n");
     console_write("Kernel: Educational Operating System\n");
@@ -543,8 +553,8 @@ void cmd_cd(int argc, char** argv) {
  * Usage: cat [-n] [-h|--help] file [file...]
  */
 void cmd_cat(int argc, char** argv) {
-    /* Static buffer to avoid large stack allocation */
-    static uint8_t buffer[VFS_MAX_FILE_SIZE];
+    /* Chunk buffer (static to keep it off the kernel stack) */
+    static uint8_t buffer[512];
 
     int flag_number = 0;
     int file_count = 0;
@@ -600,20 +610,24 @@ void cmd_cat(int argc, char** argv) {
             continue;
         }
 
-        ssize_t bytes_read = vfs_read(file, 0, file->length, buffer);
-        if (bytes_read < 0) {
-            console_write("cat: ");
-            console_write(argv[i]);
-            console_write(": Error reading file\n");
-            continue;
-        }
-
-        if (flag_number) {
-            /* Print with line numbers */
-            uint32_t line_num = 1;
-            int at_line_start = 1;
+        /* Stream the file in chunks (files can be up to 1 MiB). */
+        uint32_t offset = 0;
+        uint32_t line_num = 1;
+        int at_line_start = 1;
+        for (;;) {
+            ssize_t bytes_read = vfs_read(file, offset, sizeof(buffer), buffer);
+            if (bytes_read < 0) {
+                console_write("cat: ");
+                console_write(argv[i]);
+                console_write(": Error reading file\n");
+                break;
+            }
+            if (bytes_read == 0) {
+                break;
+            }
+            offset += (uint32_t)bytes_read;
             for (ssize_t j = 0; j < bytes_read; j++) {
-                if (at_line_start) {
+                if (flag_number && at_line_start) {
                     print_number_padded(line_num, 6);
                     console_write("  ");
                     at_line_start = 0;
@@ -623,11 +637,6 @@ void cmd_cat(int argc, char** argv) {
                     line_num++;
                     at_line_start = 1;
                 }
-            }
-            /* Ensure last line (without trailing newline) still counted */
-        } else {
-            for (ssize_t j = 0; j < bytes_read; j++) {
-                console_put_char((char)buffer[j]);
             }
         }
     }
@@ -703,6 +712,29 @@ void cmd_stat(int argc, char** argv) {
     console_write(" Inode: ");
     print_number(node->inode);
     console_put_char('\n');
+
+    /* Access: (0644/-rw-r--r--) */
+    {
+        uint32_t m = fileio_node_mode(node);
+        char perm[11];
+        const char *rwx = "rwxrwxrwx";
+        perm[0] = node->type == NODE_DIRECTORY ? 'd' : '-';
+        for (int b = 0; b < 9; b++) {
+            perm[1 + b] = (m & (0400u >> b)) ? rwx[b] : '-';
+        }
+        perm[10] = '\0';
+        char oct[5];
+        oct[0] = '0';
+        oct[1] = (char)('0' + ((m >> 6) & 7));
+        oct[2] = (char)('0' + ((m >> 3) & 7));
+        oct[3] = (char)('0' + (m & 7));
+        oct[4] = '\0';
+        console_write(" Access: (");
+        console_write(oct);
+        console_write("/");
+        console_write(perm);
+        console_write(")\n");
+    }
 }
 
 /*
@@ -846,13 +878,8 @@ void cmd_mkdir(int argc, char** argv) {
             continue;
         }
 
-        vfs_node_t* dir = vfs_create_node(leaf, NODE_DIRECTORY);
-        if (!dir) {
-            console_write("mkdir: cannot create directory (out of nodes)\n");
-            continue;
-        }
-        if (vfs_add_child(parent, dir) != 0) {
-            console_write("mkdir: cannot create directory (parent full)\n");
+        if (!vfs_create_in(parent, leaf, NODE_DIRECTORY)) {
+            console_write("mkdir: cannot create directory (out of nodes or parent full)\n");
         }
     }
 }
@@ -885,13 +912,8 @@ void cmd_touch(int argc, char** argv) {
             continue;
         }
 
-        vfs_node_t* file = vfs_create_node(leaf, NODE_FILE);
-        if (!file) {
-            console_write("touch: cannot create file (out of nodes)\n");
-            continue;
-        }
-        if (vfs_add_child(parent, file) != 0) {
-            console_write("touch: cannot create file (directory full)\n");
+        if (!vfs_create_in(parent, leaf, NODE_FILE)) {
+            console_write("touch: cannot create file (out of nodes or directory full)\n");
         }
     }
 }
@@ -928,36 +950,38 @@ void cmd_write(int argc, char** argv) {
         return;
     }
     if (!file) {
-        file = vfs_create_node(leaf, NODE_FILE);
-        if (!file || vfs_add_child(parent, file) != 0) {
+        file = vfs_create_in(parent, leaf, NODE_FILE);
+        if (!file) {
             console_write("write: cannot create file\n");
             return;
         }
     }
 
-    /* Assemble the payload from argv[2..] into a static buffer. */
-    static uint8_t buffer[VFS_MAX_FILE_SIZE];
+    /* Assemble the payload from argv[2..] (one command line, so a small
+     * static buffer is plenty). */
+    static uint8_t buffer[1024];
     uint32_t pos = 0;
-    for (int i = 2; i < argc && pos < VFS_MAX_FILE_SIZE; i++) {
-        if (i > 2 && pos < VFS_MAX_FILE_SIZE) {
+    for (int i = 2; i < argc && pos < sizeof(buffer) - 1; i++) {
+        if (i > 2) {
             buffer[pos++] = ' ';
         }
         const char* w = argv[i];
-        for (uint32_t j = 0; w[j] != '\0' && pos < VFS_MAX_FILE_SIZE; j++) {
+        for (uint32_t j = 0; w[j] != '\0' && pos < sizeof(buffer) - 1; j++) {
             buffer[pos++] = (uint8_t)w[j];
         }
     }
-    if (pos < VFS_MAX_FILE_SIZE) {
-        buffer[pos++] = '\n';
-    }
+    buffer[pos++] = '\n';
 
+    /* Replace the old contents: truncate first, then write. */
+    if (vfs_truncate(file, 0) != 0) {
+        console_write("write: cannot truncate file\n");
+        return;
+    }
     ssize_t written = vfs_write(file, 0, pos, buffer);
     if (written < 0) {
         console_write("write: error writing file\n");
         return;
     }
-    /* Truncate the logical length to what we just wrote. */
-    file->length = (uint32_t)written;
 }
 
 /*
@@ -986,13 +1010,20 @@ void cmd_rm(int argc, char** argv) {
             console_write("'\n");
             continue;
         }
-        if (vfs_find_node(parent, leaf) == NULL) {
+        vfs_node_t* victim = vfs_find_node(parent, leaf);
+        if (victim == NULL) {
             console_write("rm: ");
             console_write(argv[a]);
             console_write(": No such file or directory\n");
             continue;
         }
-        if (vfs_remove_child(parent, leaf) != 0) {
+        if (victim->type == NODE_DIRECTORY && victim->child_count > 0) {
+            console_write("rm: ");
+            console_write(argv[a]);
+            console_write(": Directory not empty\n");
+            continue;
+        }
+        if (vfs_unlink(parent, leaf) != 0) {
             console_write("rm: ");
             console_write(argv[a]);
             console_write(": failed to remove\n");
@@ -1054,7 +1085,9 @@ void cmd_color(int argc, char** argv) {
  * console_write and this always returns to the prompt.
  */
 void cmd_occ(int argc, char** argv) {
-    static uint8_t buffer[VFS_MAX_FILE_SIZE];
+    /* Source files are read into a fixed buffer (OrgitoCompiler sources
+     * are small; larger files are refused below). */
+    static uint8_t buffer[16384];
 
     if (argc != 2 || string_compare(argv[1], "-h") == 0 || string_compare(argv[1], "--help") == 0) {
         console_write("Usage: occ <file>\n");
@@ -1084,6 +1117,12 @@ void cmd_occ(int argc, char** argv) {
         return;
     }
 
+    if (file->length > sizeof(buffer)) {
+        console_write("occ: ");
+        console_write(argv[1]);
+        console_write(": source file too large (max 16 KiB)\n");
+        return;
+    }
     ssize_t bytes_read = vfs_read(file, 0, file->length, buffer);
     if (bytes_read < 0) {
         console_write("occ: ");

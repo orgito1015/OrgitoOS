@@ -32,6 +32,14 @@ void pmm_init(struct multiboot_info *mboot);
 /* Allocate a physical page (returns physical address) */
 void *pmm_alloc_page(void);
 
+/* Allocate `count` physically contiguous pages (first fit). Returns the
+ * physical address of the first page, or NULL. Free with
+ * pmm_free_pages(addr, count). */
+void *pmm_alloc_pages(uint32_t count);
+
+/* Free `count` contiguous pages starting at `page`. */
+void pmm_free_pages(void *page, uint32_t count);
+
 /* Free a physical page */
 void pmm_free_page(void *page);
 

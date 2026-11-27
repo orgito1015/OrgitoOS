@@ -1,37 +1,31 @@
 /*
- * OrgitoOS - exec(): load a real ELF32 binary into a process's own
- * address space.
+ * OrgitoOS - exec(): load a real ELF32 binary into a new process.
  *
- * Every ring 3 "process" up to now (kernel/user_programs.c) has been a
- * plain C function linked straight into the kernel image and reached
- * through the small user-executable carve-out of the identity map
- * ([kernel_start, rodata_start) in memory/vmm.c). This file is the first
- * code path that instead reads a file from the VFS, parses it as ELF32,
- * and maps its PT_LOAD segments into a private set of freshly allocated
- * physical pages - a real loaded binary, not a function pointer into the
- * kernel.
+ * Reads an executable file from the VFS, checks its ELF header, creates a
+ * new user process in its own address space and maps every PT_LOAD
+ * segment into freshly allocated private pages: file bytes are copied in,
+ * the rest (.bss) is zero-filled. The process then starts at the ELF
+ * entry point in ring 3, on its own user stack.
  *
  * Design note - spawn, not in-place replace: POSIX exec() replaces the
- * calling process's own image (same pid). This implementation instead
- * creates a brand-new process (like posix_spawn()), because it composes
- * cleanly with the rest of process.c/vmm.c as they exist today without
- * touching context_switch's syscall-return path.
+ * calling process's image (same pid). Here exec creates a brand-new child
+ * process instead (like posix_spawn()), which composes cleanly with the
+ * existing process code; fork() deep-copies loaded images, so fork-then-
+ * exec also works.
  *
- * A process's ELF segments are private, unshared mappings in its own
- * page_dir (see process_t.exec_pages). sys_fork() (kernel/syscall.c)
- * deep-copies them into the child's own page_dir at the identical virtual
- * addresses - the same trick already used for the fixed user-stack window
- * (PROCESS_USTACK_VIRT_BASE) - so "fork(), then have the child exec()",
- * the common Unix process-spawn idiom, works: each side ends up with its
- * own private physical pages, and mutating one never touches the other's.
+ * Race-free start: the process is created SUSPENDED
+ * (process_create_user_suspended) and only made runnable with
+ * process_start() once every page is mapped - otherwise a timer tick could
+ * schedule it before its code exists.
  *
- * The syscall is still named SYS_EXEC (kernel/syscall.h) to match the
- * roadmap wording ("exec() ... not loaded binaries"); what changed is
- * real ELF loading, not process identity semantics.
+ * Programs are built from userland/ (see the Makefile) as standalone ELF
+ * files, embedded in the kernel image and copied into /bin at boot by
+ * exec_install_embedded_programs().
  */
 
 #include "exec.h"
 #include "string.h"
+#include "fileio.h"
 #include "../drivers/console.h"
 #include "../fs/vfs.h"
 #include "../memory/heap.h"
@@ -39,8 +33,7 @@
 #include "../memory/vmm.h"
 
 /* ------------------------------------------------------------------ */
-/* Minimal ELF32 structures (no libc/system elf.h in a freestanding    */
-/* build, so declare just enough to load a static executable)          */
+/* Minimal ELF32 structures                                             */
 /* ------------------------------------------------------------------ */
 
 #define EI_NIDENT   16
@@ -84,10 +77,15 @@ typedef struct {
     uint32_t p_align;
 } __attribute__((packed)) elf32_phdr_t;
 
+/* User images must live in this window: above the user stack and far from
+ * the kernel's identity map (memory/vmm.c), below the top of memory. */
+#define EXEC_USER_MIN 0x10000000u
+#define EXEC_USER_MAX 0xC0000000u
+
 #define EXEC_PAGE_ALIGN_DOWN(x) ((uint32_t)(x) & ~(PAGE_SIZE - 1u))
 #define EXEC_PAGE_ALIGN_UP(x)   (((uint32_t)(x) + PAGE_SIZE - 1u) & ~(PAGE_SIZE - 1u))
 
-/* Basename of a VFS path, for the process table's name[] field. */
+/* Basename of a path, for the process table's name[] field. */
 static void basename_into(const char *path, char *out, size_t out_size) {
     const char *slash = 0;
     for (const char *p = path; *p; p++) {
@@ -101,99 +99,84 @@ static void basename_into(const char *path, char *out, size_t out_size) {
     }
 }
 
-process_t *process_exec(const char *path, uint8_t priority) {
-    if (!path || path[0] != '/') {
-        console_write("exec: path must be absolute\n");
-        return 0;
-    }
+static void print_num(uint32_t v, int base) {
+    char buf[12];
+    itoa((int)v, buf, base);
+    console_write(buf);
+}
 
-    vfs_node_t *file = vfs_resolve_path(path);
-    if (!file) {
-        console_write("exec: ");
-        console_write(path);
-        console_write(": No such file or directory\n");
-        return 0;
+const char *exec_strerror(int err) {
+    switch (err) {
+        case EXEC_ENOENT:  return "No such file or directory";
+        case EXEC_EISDIR:  return "Is a directory";
+        case EXEC_EACCES:  return "Permission denied";
+        case EXEC_ENOEXEC: return "Exec format error";
+        case EXEC_ENOMEM:  return "Cannot allocate memory";
+        default:           return "Unknown error";
     }
-    if (file->type != NODE_FILE) {
-        console_write("exec: ");
-        console_write(path);
-        console_write(": Is a directory\n");
-        return 0;
-    }
-    if (file->length < sizeof(elf32_ehdr_t)) {
-        console_write("exec: file too small to be an ELF binary\n");
-        return 0;
-    }
+}
+
+process_t *process_exec(const char *path, uint8_t priority, int verbose, int *err) {
+    int dummy;
+    if (!err) err = &dummy;
+    *err = 0;
+
+    vfs_node_t *file = fileio_lookup(path);
+    if (!file) { *err = EXEC_ENOENT; return 0; }
+    if (file->type != NODE_FILE) { *err = EXEC_EISDIR; return 0; }
+    /* Execute permission (owner x bit), like Linux. */
+    if (!(fileio_node_mode(file) & 0100)) { *err = EXEC_EACCES; return 0; }
+    if (file->length < sizeof(elf32_ehdr_t)) { *err = EXEC_ENOEXEC; return 0; }
 
     uint8_t *filebuf = (uint8_t *)kmalloc(file->length);
-    if (!filebuf) {
-        console_write("exec: out of memory reading file\n");
-        return 0;
-    }
+    if (!filebuf) { *err = EXEC_ENOMEM; return 0; }
 
     ssize_t got = vfs_read(file, 0, file->length, filebuf);
-    if (got < (ssize_t)sizeof(elf32_ehdr_t)) {
-        console_write("exec: failed to read file\n");
+    if (got != (ssize_t)file->length) {
         kfree(filebuf);
+        *err = EXEC_ENOEXEC;
         return 0;
     }
 
+    /* ---- Validate the ELF header and program headers ---------------- */
     elf32_ehdr_t *eh = (elf32_ehdr_t *)filebuf;
+    int bad = 0;
     if (eh->e_ident[0] != ELFMAG0 || eh->e_ident[1] != ELFMAG1 ||
-        eh->e_ident[2] != ELFMAG2 || eh->e_ident[3] != ELFMAG3) {
-        console_write("exec: not an ELF file\n");
-        kfree(filebuf);
-        return 0;
-    }
-    if (eh->e_ident[4] != ELFCLASS32 || eh->e_ident[5] != ELFDATA2LSB) {
-        console_write("exec: not a 32-bit little-endian ELF\n");
-        kfree(filebuf);
-        return 0;
-    }
-    if (eh->e_type != ET_EXEC) {
-        console_write("exec: not a static executable (ET_EXEC) - PIE/shared objects are not supported\n");
-        kfree(filebuf);
-        return 0;
-    }
-    if (eh->e_machine != EM_386) {
-        console_write("exec: not an x86 (EM_386) binary\n");
-        kfree(filebuf);
-        return 0;
-    }
-    if (eh->e_phnum == 0 || eh->e_phoff == 0 ||
-        eh->e_phentsize < sizeof(elf32_phdr_t)) {
-        console_write("exec: no program headers\n");
-        kfree(filebuf);
-        return 0;
-    }
-    if ((uint64_t)eh->e_phoff + (uint64_t)eh->e_phnum * eh->e_phentsize > file->length) {
-        console_write("exec: program headers run past end of file\n");
-        kfree(filebuf);
-        return 0;
-    }
+        eh->e_ident[2] != ELFMAG2 || eh->e_ident[3] != ELFMAG3) bad = 1;
+    else if (eh->e_ident[4] != ELFCLASS32 || eh->e_ident[5] != ELFDATA2LSB) bad = 1;
+    else if (eh->e_type != ET_EXEC || eh->e_machine != EM_386) bad = 1;
+    else if (eh->e_phnum == 0 || eh->e_phoff == 0 ||
+             eh->e_phentsize < sizeof(elf32_phdr_t)) bad = 1;
+    else if ((uint64_t)eh->e_phoff + (uint64_t)eh->e_phnum * eh->e_phentsize > file->length) bad = 1;
 
-    /* Upper bound on the number of distinct pages every PT_LOAD segment
-     * could touch, for sizing the tracking array up front. Some entries
-     * may end up unused if segments share a page - exec_page_count (not
-     * the array length) is authoritative for how many are actually live. */
     uint32_t max_pages = 0;
-    for (uint16_t i = 0; i < eh->e_phnum; i++) {
+    for (uint16_t i = 0; !bad && i < eh->e_phnum; i++) {
         elf32_phdr_t *ph = (elf32_phdr_t *)(filebuf + eh->e_phoff + (uint32_t)i * eh->e_phentsize);
         if (ph->p_type != PT_LOAD || ph->p_memsz == 0) continue;
+        if (ph->p_filesz > ph->p_memsz ||
+            (uint64_t)ph->p_offset + ph->p_filesz > file->length ||
+            ph->p_vaddr < EXEC_USER_MIN ||
+            (uint64_t)ph->p_vaddr + ph->p_memsz > EXEC_USER_MAX) {
+            bad = 1;
+            break;
+        }
         uint32_t start = EXEC_PAGE_ALIGN_DOWN(ph->p_vaddr);
-        uint32_t end   = EXEC_PAGE_ALIGN_UP((uint64_t)ph->p_vaddr + ph->p_memsz);
+        uint32_t end   = EXEC_PAGE_ALIGN_UP(ph->p_vaddr + ph->p_memsz);
         max_pages += (end - start) / PAGE_SIZE;
     }
-    if (max_pages == 0) {
-        console_write("exec: no loadable segments\n");
+    if (!bad && (max_pages == 0 || eh->e_entry < EXEC_USER_MIN || eh->e_entry >= EXEC_USER_MAX)) {
+        bad = 1;
+    }
+    if (bad) {
         kfree(filebuf);
+        *err = EXEC_ENOEXEC;
         return 0;
     }
 
     exec_page_t *exec_pages = (exec_page_t *)kmalloc(max_pages * sizeof(exec_page_t));
     if (!exec_pages) {
-        console_write("exec: out of memory\n");
         kfree(filebuf);
+        *err = EXEC_ENOMEM;
         return 0;
     }
     uint32_t exec_page_count = 0;
@@ -201,14 +184,16 @@ process_t *process_exec(const char *path, uint8_t priority) {
     char name[PROCESS_NAME_LEN];
     basename_into(path, name, sizeof(name));
 
-    process_t *p = process_create_user(name, (void (*)(void))(uintptr_t)eh->e_entry, priority);
+    /* Suspended: cannot run until process_start() below. */
+    process_t *p = process_create_user_suspended(name, eh->e_entry, priority);
     if (!p) {
-        console_write("exec: could not create process\n");
         kfree(exec_pages);
         kfree(filebuf);
+        *err = EXEC_ENOMEM;
         return 0;
     }
 
+    /* ---- Map and fill every PT_LOAD segment ------------------------- */
     int failed = 0;
     for (uint16_t i = 0; i < eh->e_phnum && !failed; i++) {
         elf32_phdr_t *ph = (elf32_phdr_t *)(filebuf + eh->e_phoff + (uint32_t)i * eh->e_phentsize);
@@ -218,20 +203,15 @@ process_t *process_exec(const char *path, uint8_t priority) {
         if (ph->p_flags & PF_W) flags |= PTE_WRITABLE;
 
         uint32_t seg_start = EXEC_PAGE_ALIGN_DOWN(ph->p_vaddr);
-        uint32_t seg_end   = EXEC_PAGE_ALIGN_UP((uint64_t)ph->p_vaddr + ph->p_memsz);
+        uint32_t seg_end   = EXEC_PAGE_ALIGN_UP(ph->p_vaddr + ph->p_memsz);
 
         for (uint32_t va = seg_start; va < seg_end; va += PAGE_SIZE) {
             if (vmm_get_physical(p->page_dir, (void *)va) != 0) {
-                /* Already backed (segments sharing a page-aligned page) */
-                continue;
+                continue;   /* page shared with a previous segment */
             }
             void *phys = pmm_alloc_page();
-            if (!phys) {
-                console_write("exec: out of physical memory\n");
-                failed = 1;
-                break;
-            }
-            memset(phys, 0, PAGE_SIZE);   /* covers .bss and partial pages */
+            if (!phys) { failed = 1; break; }
+            memset(phys, 0, PAGE_SIZE);   /* .bss and partial pages */
             vmm_map_page(p->page_dir, (void *)va, (uint32_t)phys, flags);
             exec_pages[exec_page_count].vaddr = va;
             exec_pages[exec_page_count].phys  = (uint32_t)phys;
@@ -240,13 +220,9 @@ process_t *process_exec(const char *path, uint8_t priority) {
         }
         if (failed) break;
 
-        /* Copy this segment's file-backed bytes (p_filesz, may be < p_memsz
-         * for .bss) into the pages just mapped. The pages live in `p`'s own
-         * page_dir, not the currently-active one (this loader runs as
-         * whichever kernel-mode context called process_exec - the shell
-         * thread, or a syscall on the caller's own kernel stack), so reach
-         * them through vmm_get_physical() + the kernel's identity map
-         * rather than a direct pointer into p_vaddr. */
+        /* Copy the file-backed bytes. The pages belong to p's page
+         * directory, not the active one, so write them through their
+         * physical (identity-mapped) addresses. */
         uint32_t remaining = ph->p_filesz;
         uint32_t file_off  = ph->p_offset;
         uint32_t dest_va   = ph->p_vaddr;
@@ -265,90 +241,85 @@ process_t *process_exec(const char *path, uint8_t priority) {
         }
     }
 
+    uint32_t entry = eh->e_entry;
     kfree(filebuf);
 
-    if (failed) {
-        for (uint32_t i = 0; i < exec_page_count; i++) {
-            pmm_free_page((void *)exec_pages[i].phys);
-        }
-        kfree(exec_pages);
-        /* Never scheduled yet in any meaningful way beyond being enqueued;
-         * dequeue it and free everything else right away instead of
-         * leaving an unreapable zombie behind (no parent will wait() for
-         * a spawn that never got to run). */
-        process_kill(p->pid);
-        process_release(p);
-        return 0;
-    }
-
+    /* Hand the page list to the PCB first: on failure, process_kill() +
+     * process_release() free the pages and the array with everything else. */
     p->exec_pages      = exec_pages;
     p->exec_page_count = exec_page_count;
 
-    console_write("exec: loaded '");
-    console_write(path);
-    console_write("' as pid ");
-    {
-        char buf[12];
-        itoa((int)p->pid, buf, 10);
-        console_write(buf);
+    if (failed) {
+        process_kill(p->pid);
+        process_release(p);
+        *err = EXEC_ENOMEM;
+        return 0;
     }
-    console_write(", entry 0x");
-    {
-        char buf[12];
-        itoa((int)eh->e_entry, buf, 16);
-        console_write(buf);
-    }
-    console_write(" (");
-    {
-        char buf[12];
-        itoa((int)exec_page_count, buf, 10);
-        console_write(buf);
-    }
-    console_write(" page(s))\n");
 
-    return p;
+    if (verbose) {
+        console_write("exec: loaded '");
+        console_write(path);
+        console_write("' as pid ");
+        print_num(p->pid, 10);
+        console_write(", entry 0x");
+        print_num(entry, 16);
+        console_write(" (");
+        print_num(exec_page_count, 10);
+        console_write(" page(s))\n");
+    }
+    return p;   /* still suspended: caller calls process_start() */
 }
 
 /* ------------------------------------------------------------------ */
-/* Embedded demo binary                                                 */
+/* Embedded programs                                                    */
 /* ------------------------------------------------------------------ */
 
 /*
- * Built from userland/hello.c by the Makefile's userland rules: compiled
- * freestanding and linked as a real ELF32 executable (userland/user.ld),
- * then objcopy'd into the kernel image as a plain byte blob. These
- * symbols mark its start/end in the running kernel's own memory.
+ * Each userland program is linked as its own ELF file and then turned
+ * into an object with `objcopy -I binary` (see the Makefile). objcopy
+ * names the start/end symbols after the file name.
  */
 extern uint8_t _binary_hello_elf_start[];
 extern uint8_t _binary_hello_elf_end[];
+extern uint8_t _binary_FileCopy_elf_start[];
+extern uint8_t _binary_FileCopy_elf_end[];
+
+typedef struct {
+    const char *name;
+    const uint8_t *start;
+    const uint8_t *end;
+} embedded_prog_t;
+
+static void install_one(vfs_node_t *bin, const embedded_prog_t *prog) {
+    uint32_t size = (uint32_t)(prog->end - prog->start);
+    if (size == 0 || size > VFS_MAX_FILE_SIZE) {
+        console_write("exec: embedded program has an invalid size\n");
+        return;
+    }
+    vfs_node_t *f = vfs_find_node(bin, prog->name);
+    if (!f) {
+        f = vfs_create_in(bin, prog->name, NODE_FILE);
+    }
+    if (!f) {
+        console_write("exec: could not create /bin entry\n");
+        return;
+    }
+    vfs_truncate(f, 0);
+    vfs_write(f, 0, size, prog->start);
+    f->flags = VFS_FLAG_MODE_SET | 0755u;   /* rwxr-xr-x */
+}
 
 void exec_install_embedded_programs(void) {
-    vfs_node_t *root = vfs_get_root();
-    vfs_node_t *bin = vfs_find_node(root, "bin");
+    vfs_node_t *bin = vfs_find_node(vfs_get_root(), "bin");
     if (!bin) {
-        console_write("exec: /bin missing, cannot preload demo binary\n");
+        console_write("exec: /bin missing, cannot install programs\n");
         return;
     }
-
-    uint32_t size = (uint32_t)(_binary_hello_elf_end - _binary_hello_elf_start);
-    if (size == 0 || size > VFS_MAX_FILE_SIZE) {
-        console_write("exec: embedded hello binary has an invalid size\n");
-        return;
+    const embedded_prog_t progs[] = {
+        { "hello",    _binary_hello_elf_start,    _binary_hello_elf_end    },
+        { "FileCopy", _binary_FileCopy_elf_start, _binary_FileCopy_elf_end },
+    };
+    for (size_t i = 0; i < sizeof(progs) / sizeof(progs[0]); i++) {
+        install_one(bin, &progs[i]);
     }
-
-    vfs_node_t *hello = vfs_create_node("hello", NODE_FILE);
-    if (!hello) {
-        console_write("exec: could not create /bin/hello node\n");
-        return;
-    }
-    vfs_write(hello, 0, size, _binary_hello_elf_start);
-    vfs_add_child(bin, hello);
-
-    console_write("exec: preloaded /bin/hello (");
-    {
-        char buf[12];
-        itoa((int)size, buf, 10);
-        console_write(buf);
-    }
-    console_write(" bytes) - a real ELF32 binary, run it with: exec /bin/hello\n");
 }

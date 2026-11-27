@@ -73,11 +73,23 @@ See [docs/architecture/ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md) for d
 - ✅ **Process control blocks** - PID/PPID, state, priority, kernel/user stacks (`process/process.h`)
 - ✅ **Context switching** - Callee-saved register switch on the kernel stack (`arch/x86/context.S`)
 - ✅ **Multilevel round-robin scheduler** - 3 priority levels with anti-starvation aging, 50ms quantum (`process/scheduler.c`)
-- ⚠️ **Ring 3 user mode** - GDT/TSS-based privilege transitions (`arch/x86/gdt.c`, `context.S`); IRET into ring 3 and the first syscall both work, but the `forktest`/`user`/`counters` shell commands crash with an Invalid Opcode exception shortly after — a real, unresolved bug in ring-3 execution under real (non-single-stepped) interrupt timing, not a scheduler/race issue (both of those were checked and ruled out)
+- ✅ **Ring 3 user mode** - GDT/TSS-based privilege transitions (`arch/x86/gdt.c`, `context.S`), each user process in its own paged address space (paging is enabled in `memory/vmm.c`)
 - ✅ **System calls** - `int 0x80` gate with `exit`/`write`/`getpid`/`fork`/`yield`/`sleep`/`getppid`/`wait` (`kernel/syscall.c`)
 - ✅ **Kernel heap allocator** - `kmalloc`/`kfree` first-fit free list (`memory/heap.c`)
-- ⚠️ **Shell process commands** - `ps`, `kill`, `spawn`, `sched`, `psleep` work; `forktest`, `user`, `counters`, `uecho` launch a ring-3 process but currently crash it (see above) (`kernel/proc_commands.c`)
+- ✅ **Shell process commands** - `ps`, `kill`, `spawn`, `sched`, `psleep`, and the ring-3 demos `forktest`, `user`, `counters`, `uecho` (`kernel/proc_commands.c`)
 - ✅ **`read()` syscall** - ring 3 processes can now read a line of keyboard input via `int 0x80` (`kernel/syscall.c`, `include/usyscall.h`), demoed by the `uecho` shell command
+
+### POSIX File I/O & strace (✅ Complete)
+- ✅ **`open`/`read`/`write`/`close` syscalls** - per-process file descriptor tables (0/1/2 = stdin/stdout/stderr, first file gets fd 3), Linux errno values, atomic `O_CREAT|O_EXCL`, partial writes at the 4 KiB VFS file cap (`kernel/fileio.c`)
+- ✅ **`strace`** - traces `openat/read/write/close` made through `int 0x80`, in strace's own output format, with `-o file` and `-e trace=...`
+- ✅ **`FileCopy`** - `userland/FileCopy.c`, a portable POSIX program that builds unchanged for OrgitoOS and Linux
+- ✅ **Shell additions** - `chmod`, `cmp`, `whoami`, `layout full|split`, `uname -r`, `cmd1 && cmd2`
+- 📄 Course assignment write-up (Albanian): [docs/assignments/detyre1](docs/assignments/detyre1/README.md)
+
+### Programs & Persistent Storage (✅ Complete)
+- ✅ **`exec()` of real ELF32 binaries** (`kernel/exec.c`) - programs in `userland/` are built as standalone executables, installed in `/bin`, and run as separate ring 3 processes: type `hello` or `FileCopy`, or `exec /bin/hello` to see where it was loaded
+- ✅ **ATA disk driver** (`drivers/ata.c`) and **OrgitoFS** (`fs/diskfs.c`) - a persistent filesystem on `disk.img`, mounted at `/mnt`; files, directories and permissions survive reboots (`df`, `sync`)
+- ✅ **Bigger files** - ramfs files grow on the heap up to 1 MiB (was a fixed 4 KiB)
 
 ### Phase 2 - Address Space Isolation & Further Hardening (In Progress)
 - ✅ **Per-process page directories** with private, non-shared physical user stacks
@@ -90,7 +102,6 @@ See [docs/architecture/ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md) for d
 - 🔲 Real networking (packet TX/RX, socket send/receive — currently stubs)
 - 🔲 SMP Application Processor bring-up (CPU detection works; APIC-driven boot does not)
 - 🔲 Shell pipe redirection between commands
-- 🔲 `exec()` - user code is still kernel-linked function pointers, not loaded binaries
 - And more! See [roadmap.md](docs/roadmap/roadmap.md)
 
 ##  Quick Start

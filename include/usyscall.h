@@ -54,6 +54,9 @@ static inline int  u_fork(void)            { return _syscall0(SYS_FORK); }
 static inline int  u_yield(void)           { return _syscall0(SYS_YIELD); }
 static inline int  u_sleep(uint32_t ms)    { return _syscall1(SYS_SLEEP, ms); }
 static inline int  u_wait(int *status)     { return _syscall1(SYS_WAIT, (uint32_t)status); }
+/* Start the ELF program at `path` as a new child process.
+ * Returns its pid, or -errno. Wait for it with u_wait(). */
+static inline int  u_exec(const char *path) { return _syscall1(SYS_EXEC, (uint32_t)path); }
 static inline int  u_read(char *buf, uint32_t maxlen) {
     return _syscall2(SYS_READ, (uint32_t)buf, maxlen);
 }

@@ -84,6 +84,14 @@ echo ""
 # window (native VGA text mode is a tiny fixed 720x400px), so maximizing
 # or resizing the QEMU window actually makes the display bigger instead
 # of leaving it pinned at native size.
-qemu-system-i386 -cdrom "$ISO_FILE" -boot d -display gtk,zoom-to-fit=on
+# disk.img is the persistent hard disk (OrgitoFS, mounted at /mnt).
+DISK_IMG="disk.img"
+if [ ! -f "$DISK_IMG" ]; then
+    echo -e "${YELLOW}Creating 32 MiB disk image $DISK_IMG...${NC}"
+    dd if=/dev/zero of="$DISK_IMG" bs=1M count=32 status=none
+fi
+qemu-system-i386 -cdrom "$ISO_FILE" -boot d \
+    -drive file="$DISK_IMG",format=raw,index=0,media=disk \
+    -display gtk,zoom-to-fit=on
 
 echo -e "${YELLOW}QEMU exited${NC}"

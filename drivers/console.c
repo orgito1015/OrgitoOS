@@ -271,6 +271,34 @@ int console_parse_color_name(const char *name) {
     return -1;
 }
 
+/*
+ * Switch between the default split-screen layout and a single full-width
+ * (80-column) left pane. Full-width mode is handy for programs whose output
+ * lines are wider than 40 columns (e.g. strace traces). The right pane's
+ * shell keeps running in split mode only; in full mode its column range is
+ * owned by the left pane, so focus is forced back to the left pane.
+ */
+static int fullscreen_mode = 0;
+
+void console_set_fullscreen(int full) {
+    if (full) {
+        panes[CONSOLE_PANE_LEFT].width = VGA_WIDTH;
+        fullscreen_mode = 1;
+        pane_clear(CONSOLE_PANE_LEFT);
+    } else {
+        panes[CONSOLE_PANE_LEFT].width = DIVIDER_COL;
+        fullscreen_mode = 0;
+        pane_clear(CONSOLE_PANE_LEFT);
+        pane_clear(CONSOLE_PANE_RIGHT);
+        draw_divider();
+    }
+    console_focus_pane(CONSOLE_PANE_LEFT);
+}
+
+int console_is_fullscreen(void) {
+    return fullscreen_mode;
+}
+
 /* Legacy function aliases for backwards compatibility */
 void terminal_put_char(char c) {
     console_put_char(c);
